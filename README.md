@@ -11,12 +11,13 @@
 3. [データ・API移行設計](docs/data-and-api.md)
 4. [運用・受け入れ](docs/operations-and-acceptance.md)
 5. [未決定事項](docs/decision-log.md)
+6. [Sitesの非同期・定期処理の資料調査](docs/sites-async-review.md)
 
 `docs/baseline/`は既存リポジトリのローカル作業ツリーから2026-10-21に複写した**参照資料**です。元の基準コミットは`b41cde9a74cc8f1591f1567874a3bba62fe0a05c`ですが、複写元には未コミットの改訂が含まれます。参照資料に残るCloud Run・Cloud SQL・Googleログインなどの記述はSites版の実装指示ではありません。設計の優先順位は、このリポジトリの`docs/`直下、次に参照資料です。
 
 ## 方針
 
-画面とサーバー処理はSitesのWorker構成を候補とし、永続データをD1、非公開画像・報告生成物をR2で扱う。本人確認、職員限定の閲覧、1分監視・5分照合・日次期限処理、Chatwork OAuthと投稿は**実機検証を通るまで採用確定しない**。既存APIのNode.js/PostgreSQLコードをそのまま配置できる前提は置かない。
+画面とサーバー処理はSitesのWorker構成を候補とし、永続データをD1、非公開画像・報告生成物をR2で扱う。職員が各自のChatGPTアカウントを使い共通利用を避けることは、当面は人の運用で管理する。Sitesの定期更新で毎分監視・5分後照合の保証は確認できず、個別遅延にはCloud Tasks、毎分・日次にはCloud Schedulerを代替候補とする。外部実行からSiteへの認証済み接続を含め、**実機検証を通るまで採用確定しない**。既存APIのNode.js/PostgreSQLコードをそのまま配置できる前提は置かない。
 
 関連作業はこのリポジトリのGitHub Issuesで管理します。元リポジトリのIssueや実装状態は変更しません。
 
