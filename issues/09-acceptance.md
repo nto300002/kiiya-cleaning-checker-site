@@ -3,10 +3,12 @@ Sites版の業務機能と外部APIを同じコミット・配備版で受け入
 
 ## 作業
 - `docs/operations-and-acceptance.md`に従い、認証、D1競合、R2期限、Chatwork実送信、非同期起動、実機UI、移行・復元を検証する。
+- `docs/sites-test-cases.md`のIDをSites版OpenAPIの`operationId`へ対応付け、共有SHAと配備版を固定してから判定する。
 - 投稿済みの可能性がある結果不明では手動照合し、重複投稿の有無を確認する。
 
 ## 完了条件
 - [ ] 各ケースに合格／不合格／未実施、担当者、実行日、環境、SHA、証跡を記録する。
+- [ ] `SITE-AUTH`・`SITE-TOKEN`・`SITE-D1`・`SITE-R2`・`SITE-JOB`のケースとOpenAPIの対応表が確定している。
 - [ ] 旧版報告と新版10作業、客室ゼロ件、全室アメニティのみ、未解消不備を確認する。
 - [ ] 実Chatwork・R2・D1・定期実行を未実施のまま合格扱いしない。
 - [ ] 採用可否と元構成との運用・費用差を記録する。

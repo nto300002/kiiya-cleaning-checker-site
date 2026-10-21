@@ -12,6 +12,7 @@
 4. [運用・受け入れ](docs/operations-and-acceptance.md)
 5. [未決定事項](docs/decision-log.md)
 6. [Sitesの非同期・定期処理の資料調査](docs/sites-async-review.md)
+7. [Chatworkトークン保存案](docs/chatwork-token-storage.md)、[旧所有者の対応手順](docs/owner-mapping.md)、[Sites版受け入れケース](docs/sites-test-cases.md)
 
 `docs/baseline/`は既存リポジトリのローカル作業ツリーから2026-10-21に複写した**参照資料**です。元の基準コミットは`b41cde9a74cc8f1591f1567874a3bba62fe0a05c`ですが、複写元には未コミットの改訂が含まれます。参照資料に残るCloud Run・Cloud SQL・Googleログインなどの記述はSites版の実装指示ではありません。設計の優先順位は、このリポジトリの`docs/`直下、次に参照資料です。
 
