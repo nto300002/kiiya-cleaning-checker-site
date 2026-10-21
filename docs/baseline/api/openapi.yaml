@@ -1,0 +1,1161 @@
+openapi: 3.1.1
+info:
+  title: KIIYA Cleaning Checker API
+  version: 0.1.0-draft
+  description: API契約。運用環境での外部連携検証は別途必要。未確定の判断はdocs/api-design.mdに記載。
+servers:
+  - url: https://api.example.invalid
+    description: 配備時に環境ごとの実URLへ置換する
+security:
+  - googleIdToken: []
+tags:
+  - name: User
+  - name: Master
+  - name: Work
+  - name: Report
+  - name: Chatwork
+  - name: Alerts
+paths:
+  /v1/me:
+    get:
+      tags: [User]
+      operationId: getMe
+      responses:
+        '200':
+          description: 現在の利用者
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppUser' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/name-suggestions:
+    get:
+      tags: [User]
+      operationId: listNameSuggestions
+      parameters:
+        - { name: query, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: 全利用者で共有する氏名候補
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [names]
+                properties:
+                  names: { type: array, items: { type: string } }
+  /v1/master-revisions/current:
+    get:
+      tags: [Master]
+      operationId: getCurrentMasterRevision
+      parameters:
+        - { name: workDate, in: query, required: true, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: 指定作業日に有効なマスタ版。後日の通知確認で過去日の結果は変えない。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MasterRevision' }
+  /v1/master-revisions/{revisionId}:
+    get:
+      tags: [Master]
+      operationId: getMasterRevision
+      parameters:
+        - { $ref: '#/components/parameters/RevisionId' }
+      responses:
+        '200':
+          description: 固定されたマスタ版
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MasterRevision' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/work-records:
+    get:
+      tags: [Work]
+      operationId: listWorkRecords
+      parameters:
+        - { name: archived, in: query, schema: { type: boolean, default: false } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: 作業記録一覧。archived=trueは過去日付。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/WorkSummary' } }
+                  nextCursor: { type: [string, 'null'] }
+    post:
+      tags: [Work]
+      operationId: createWorkRecord
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateWorkRecord' }
+      responses:
+        '201':
+          description: 作業開始。masterRevisionIdを固定。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkRecord' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /v1/work-records/{workId}:
+    parameters:
+      - { $ref: '#/components/parameters/WorkId' }
+    get:
+      tags: [Work]
+      operationId: getWorkRecord
+      description: 編集用。対象から外した客室などの保存済み結果も含む。客室チェックと清掃作業単位の進捗を分け、トイレ・シャワーは個別箇所を返さない。
+      responses:
+        '200':
+          description: 作業記録
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkRecord' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Work]
+      operationId: updateWorkRecord
+      description: 作成者だけが更新できる。開始・完了の再操作と時刻修正は当日の担当職員に対応する作成者IDで判定し、変更前後・操作者・日時を訂正履歴に追記する。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateWorkRecord' }
+      responses:
+        '200':
+          description: 保存後の作業記録
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkRecord' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { description: 保存期限により内容削除済み }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /v1/work-records/{workId}/history:
+    get:
+      tags: [Work]
+      operationId: getWorkHistory
+      description: 保存期間内の作業の現行対象、固定済み報告版、および開始・完了・時刻の訂正履歴を返す。
+      parameters:
+        - { $ref: '#/components/parameters/WorkId' }
+      responses:
+        '200':
+          description: 表示対象の箇所のみ含む履歴
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkHistory' }
+  /v1/work-records/{workId}/images:
+    post:
+      tags: [Work]
+      operationId: addWorkImage
+      description: 備考に添付する画像を同期する。問題発見時の写真も備考に属する。端末発行の画像IDを維持し、作業内容更新番号を進める。保存先キーは返さない。
+      parameters:
+        - { $ref: '#/components/parameters/WorkId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [revision, clientImageId, file]
+              properties:
+                revision: { type: integer, minimum: 1 }
+                clientImageId: { type: string, format: uuid }
+                file: { type: string, format: binary }
+      responses:
+        '201':
+          description: 同期された画像と更新後の作業内容更新番号
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [image, revision]
+                properties:
+                  image: { $ref: '#/components/schemas/WorkImageAttachment' }
+                  revision: { type: integer, minimum: 1 }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /v1/work-records/{workId}/images/{imageId}:
+    delete:
+      tags: [Work]
+      operationId: removeWorkImage
+      description: 現在の作業から画像を除外する。過去の報告版の参照は残す。
+      parameters:
+        - { $ref: '#/components/parameters/WorkId' }
+        - { $ref: '#/components/parameters/ImageId' }
+        - { name: revision, in: query, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        '200':
+          description: 除外後の作業内容更新番号
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revision]
+                properties:
+                  revision: { type: integer, minimum: 1 }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/work-records/{workId}/images/{imageId}/content:
+    get:
+      tags: [Work]
+      operationId: getWorkImageContent
+      description: 作業または保存中の報告版から参照される非公開画像を、閲覧権限確認後に返す。
+      parameters:
+        - { $ref: '#/components/parameters/WorkId' }
+        - { $ref: '#/components/parameters/ImageId' }
+      responses:
+        '200':
+          description: 保存した画像。Content-Typeは元画像の検証済みMIME形式。
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/work-records/{workId}/readiness:
+    get:
+      tags: [Work]
+      operationId: getWorkReadiness
+      parameters:
+        - { $ref: '#/components/parameters/WorkId' }
+      responses:
+        '200':
+          description: 報告可能かと不足項目。休憩のはい・いいえは回答済み、未回答は不足。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Readiness' }
+        '410': { description: 保存期限により内容削除済み }
+  /v1/work-records/{workId}/report-button-press:
+    post:
+      tags: [Report]
+      operationId: pressReportButton
+      parameters:
+        - { $ref: '#/components/parameters/WorkId' }
+      responses:
+        '200':
+          description: 初回押下時刻。以後の押下では同じ値を返す。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [firstReportButtonPressedAt, pastDateConfirmationRequired]
+                properties:
+                  firstReportButtonPressedAt: { type: string, format: date-time }
+                  pastDateConfirmationRequired: { type: boolean }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { description: 保存期限により内容削除済み }
+  /v1/work-records/{workId}/report-preview:
+    post:
+      tags: [Report]
+      operationId: createReportPreview
+      description: 結果画面用の一時プレビュー。客室種別・人数別備品数・配置先、作業単位の担当・入力済み時刻または時間説明、鍵・シーツのメモを含む。トイレ・洗面の実施件数は持たない。「編集する」のOKで端末内の本文を更新し、キャンセルで破棄する。報告ボタン初回押下時刻、報告版、版番号を作らない。
+      parameters:
+        - { $ref: '#/components/parameters/WorkId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [format]
+              properties:
+                format: { type: string, enum: [pdf, markdown] }
+      responses:
+        '200':
+          description: 現在の作業内容に基づくプレビュー
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sourceRevision, format, previewId, defaultEditableBody, imageIds, roomSupplyPlans, rooms, workTasks, actualStartedAt, keyMemo, sheetMemo]
+                properties:
+                  sourceRevision: { type: integer, minimum: 1 }
+                  format: { type: string, enum: [pdf, markdown] }
+                  previewId: { type: string }
+                  defaultEditableBody: { type: string, description: 結果画面で利用者が編集できる送信本文の初期値 }
+                  imageIds: { type: array, items: { type: string, format: uuid }, description: 現在有効な添付画像。版への固定は完了時に行う }
+                  markdownText: { type: string }
+                  roomSupplyPlans: { type: array, items: { $ref: '#/components/schemas/RoomSupplyPlan' } }
+                  rooms: { type: array, items: { $ref: '#/components/schemas/WorkArea' }, description: 現在対象の客室チェック・職員最終確認・不備状態だけを含む }
+                  workTasks: { type: array, items: { $ref: '#/components/schemas/WorkTaskProgress' } }
+                  actualStartedAt: { type: [string, 'null'], format: date-time, description: 旧記録で全体開始時刻を特定できない場合はnull }
+                  keyMemo: { type: string }
+                  sheetMemo: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { description: 保存期限により内容削除済み }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /v1/report-previews/{previewId}/content:
+    get:
+      tags: [Report]
+      operationId: getReportPreviewContent
+      parameters:
+        - { name: previewId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: PDFまたはMarkdownのプレビュー内容
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+            text/markdown:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/work-records/{workId}/report-versions:
+    get:
+      tags: [Report]
+      operationId: listReportVersions
+      parameters:
+        - { $ref: '#/components/parameters/WorkId' }
+      responses:
+        '200':
+          description: 報告版一覧
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ReportVersion' } }
+    post:
+      tags: [Report]
+      operationId: submitReportVersion
+      description: 確認ダイアログの「完了」に対応。PDFと各画像をChatworkの5 MB制限内に生成できることを先に確認し、作業更新番号と編集済み本文からSending版を作る。全必須成果物の投稿成功時だけSent。部分成功・結果不明はUnknown。202は投稿成功を意味しない。最新版がSendingまたはUnknownなら409。
+      parameters:
+        - { $ref: '#/components/parameters/WorkId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sourceRevision, confirmedBody, format, pastDateConfirmed, clientImageIds]
+              properties:
+                sourceRevision: { type: integer, minimum: 1, description: プレビュー時の作業内容更新番号。現在値と異なれば409 }
+                confirmedBody: { type: string, description: 利用者が結果画面で編集し、確認ダイアログで承認した本文。空文字を許す }
+                format: { type: string, enum: [pdf, markdown] }
+                pastDateConfirmed: { type: boolean }
+                clientImageIds: { type: array, uniqueItems: true, items: { type: string, format: uuid }, description: 端末で添付中の全画像ID。サーバーに同期済みの画像ID集合と一致しなければ422。 }
+      responses:
+        '202':
+          description: 本文・画像・作業内容を固定したSendingの報告版を作り、送信処理を開始
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReportVersion' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { description: 保存期限により内容削除済み }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/report-versions/{reportId}:
+    get:
+      tags: [Report]
+      operationId: getReportVersion
+      parameters:
+        - { $ref: '#/components/parameters/ReportId' }
+      responses:
+        '200':
+          description: 報告版と現在の送信結果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReportVersion' }
+  /v1/report-versions/{reportId}/verification:
+    post:
+      tags: [Report]
+      operationId: verifyReportDelivery
+      description: 当日担当職員またはIT担当者が投稿の有無を確認し、確認者・日時・根拠を保存する。
+      parameters:
+        - { $ref: '#/components/parameters/ReportId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [posted, evidence, artifactResults]
+              properties:
+                posted: { type: boolean }
+                evidence: { type: string, minLength: 1 }
+                chatworkMessageId: { type: string }
+                artifactResults: { type: array, items: { type: object, required: [number, posted], properties: { number: { type: integer, minimum: 1 }, posted: { type: boolean }, chatworkId: { type: string } } }, description: 全必須成果物の確認結果。部分成功は報告全体をUnknownとする }
+      responses:
+        '200':
+          description: 確認結果を反映した版
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReportVersion' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/settings/chatwork:
+    get:
+      tags: [Chatwork]
+      operationId: getChatworkSettings
+      responses:
+        '200':
+          description: 秘密値を含まない設定
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatworkSettings' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [Chatwork]
+      operationId: putChatworkSettings
+      description: IT担当者のみ。roomIdからルーム名を取得し確認する。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roomId, markdownDelivery]
+              properties:
+                roomId: { type: string, pattern: '^[0-9]+$' }
+                markdownDelivery: { type: string, enum: [body, attachment] }
+                reportTemplate: { type: string }
+      responses:
+        '200':
+          description: 設定した唯一の送信先と取得したルーム名
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatworkSettings' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /v1/settings/chatwork/oauth/start:
+    post:
+      tags: [Chatwork]
+      operationId: startChatworkOAuth
+      responses:
+        '200':
+          description: 認可URL。stateとPKCE verifierはサーバー側で保持。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authorizationUrl]
+                properties:
+                  authorizationUrl: { type: string, format: uri }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/settings/chatwork/oauth/callback:
+    get:
+      tags: [Chatwork]
+      operationId: finishChatworkOAuth
+      security: []
+      parameters:
+        - { name: code, in: query, required: true, schema: { type: string } }
+        - { name: state, in: query, required: true, schema: { type: string } }
+      responses:
+        '303':
+          description: 接続結果を設定画面へリダイレクト。tokenはURLに含めない。
+          headers:
+            Location: { schema: { type: string, format: uri } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /v1/master-changes:
+    post:
+      tags: [Master]
+      operationId: createMasterChange
+      description: 変更候補の下書きを作る。申請確定と通知はsubmitで行う。
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateMasterChange' }
+      responses:
+        '201':
+          description: 変更候補
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MasterChange' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /v1/master-changes/{changeId}:
+    get:
+      tags: [Master]
+      operationId: getMasterChange
+      parameters:
+        - { $ref: '#/components/parameters/ChangeId' }
+      responses:
+        '200':
+          description: 変更状態と保存期間内の通知試行結果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MasterChange' }
+  /v1/master-changes/{changeId}/submit:
+    post:
+      tags: [Master]
+      operationId: submitMasterChange
+      description: 当日の担当職員が別職員1名の承認取得を自己申告し、その職員名を記録して通知を開始する。
+      parameters:
+        - { $ref: '#/components/parameters/ChangeId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approvalDeclared, approverEmployeeName]
+              properties:
+                approvalDeclared: { type: boolean, enum: [true], description: 別職員1名から承認を得たという申請者の自己申告 }
+                approverEmployeeName: { type: string, minLength: 1, description: 承認した別職員の氏名。本人認証には使わない }
+      responses:
+        '202':
+          description: 現在有効な元版と環境ごとの変更枠を確保して通知を開始。新版はまだ適用しない。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MasterChange' }
+        '409':
+          description: 元版が古い、または同じ環境で別の変更が通知中・適用待ち。通知は送らない。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MasterChangeConflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /v1/master-changes/{changeId}/candidate:
+    patch:
+      tags: [Master]
+      operationId: updateMasterCandidate
+      description: Notified以降の候補を全職員が編集。編集者IDを記録し、既存の確認は無効化する。
+      parameters:
+        - { $ref: '#/components/parameters/ChangeId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [revision, candidate]
+              properties:
+                revision: { type: integer, minimum: 1 }
+                candidate: { $ref: '#/components/schemas/MasterCandidate' }
+      responses:
+        '200': { description: 更新後の候補, content: { application/json: { schema: { $ref: '#/components/schemas/MasterChange' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /v1/master-changes/{changeId}/request-review:
+    post:
+      tags: [Master]
+      operationId: requestMasterReview
+      description: 差分と完成版を別職員の確認待ちにする。
+      parameters:
+        - { $ref: '#/components/parameters/ChangeId' }
+      responses:
+        '200': { description: 確認待ち, content: { application/json: { schema: { $ref: '#/components/schemas/MasterChange' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/master-changes/{changeId}/confirm:
+    post:
+      tags: [Master]
+      operationId: confirmMasterChange
+      description: 編集に参加していない別職員だけが差分と完成版を確認。元版と予約競合を検査し、翌日0:00日本時間適用の不変版を作る。
+      parameters:
+        - { $ref: '#/components/parameters/ChangeId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [revision, candidateHash]
+              properties:
+                revision: { type: integer, minimum: 1 }
+                candidateHash: { type: string, minLength: 1 }
+      responses:
+        '200': { description: 翌日適用を予約, content: { application/json: { schema: { $ref: '#/components/schemas/MasterChange' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/master-changes/{changeId}/withdraw:
+    post:
+      tags: [Master]
+      operationId: withdrawMasterChange
+      description: 申請者またはIT担当者が適用前の申請を理由付きで取り下げる。予約版は監査用に残す。
+      parameters:
+        - { $ref: '#/components/parameters/ChangeId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 1 }
+      responses:
+        '200': { description: 取下げ完了, content: { application/json: { schema: { $ref: '#/components/schemas/MasterChange' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/master-notification-evidence:
+    get:
+      tags: [Master]
+      operationId: listLateNotificationEvidence
+      description: IT担当者が不成立後に見つかった通知証拠を変更IDで照会する。元の変更記録が削除済みでも取得できる。
+      parameters:
+        - { name: changeId, in: query, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: 保存期間内の証拠一覧
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/LateNotificationEvidence' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Master]
+      operationId: recordLateNotificationEvidence
+      description: IT担当者がChatwork投稿を確認して登録する。同じ変更IDと投稿IDの重複登録を防ぎ、変更状態は変えない。
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateLateNotificationEvidence' }
+      responses:
+        '201':
+          description: 元の変更がChangeFailedと照合できた証拠
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LateNotificationEvidence' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /v1/alerts:
+    get:
+      tags: [Alerts]
+      operationId: listMyAlerts
+      responses:
+        '200':
+          description: 自分宛のアラートのみ
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/AppAlert' } }
+  /v1/alerts/{alertId}/ack:
+    post:
+      tags: [Alerts]
+      operationId: acknowledgeMyAlert
+      parameters:
+        - { name: alertId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: 自分宛アラートの確認日時を記録
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppAlert' }
+        '404': { $ref: '#/components/responses/NotFound' }
+components:
+  securitySchemes:
+    googleIdToken:
+      type: http
+      scheme: bearer
+      bearerFormat: Google ID Token
+  parameters:
+    WorkId: { name: workId, in: path, required: true, schema: { type: string } }
+    RevisionId: { name: revisionId, in: path, required: true, schema: { type: string } }
+    ReportId: { name: reportId, in: path, required: true, schema: { type: string } }
+    ChangeId: { name: changeId, in: path, required: true, schema: { type: string } }
+    ImageId: { name: imageId, in: path, required: true, schema: { type: string, format: uuid } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 1 } }
+  responses:
+    Unauthorized: { description: ログインが無効 }
+    Forbidden: { description: 操作権限がない }
+    NotFound: { description: 対象が存在しない、または閲覧権限がない }
+    Conflict: { description: 更新番号・状態・冪等キーが競合 }
+    ValidationError: { description: 入力内容または業務条件を満たさない }
+    Unavailable: { description: 送信先またはサーバーが一時利用不可 }
+  schemas:
+    AppUser:
+      type: object
+      required: [id, displayName, roles]
+      properties:
+        id: { type: string }
+        displayName: { type: string }
+        roles: { type: array, items: { type: string, enum: [staff, it_admin] } }
+    MasterRevision:
+      type: object
+      required: [id, effectiveDate, areas]
+      properties:
+        id: { type: string }
+        effectiveDate: { type: string, format: date }
+        active: { type: boolean, description: falseなら確認済みだが適用前に取り下げた監査用の版 }
+        sourceChangeId: { type: string, format: uuid }
+        reviewedByUserId: { type: string }
+        reviewedAt: { type: string, format: date-time }
+        candidateHash: { type: string }
+        notificationPostedAt: { type: [string, 'null'], format: date-time, description: Chatwork上の投稿日時 }
+        notificationConfirmedAt: { type: [string, 'null'], format: date-time, description: 投稿成功を確認した日時 }
+        areas:
+          type: array
+          items:
+            type: object
+            required: [code, name, alwaysSelected, hasDryer, checklistItems]
+            properties:
+              code: { type: string }
+              name: { type: string }
+              alwaysSelected: { type: boolean }
+              hasDryer: { type: boolean }
+              checklistItems: { type: array, items: { $ref: '#/components/schemas/ChecklistItemDefinition' }, description: 客室の作業種別別項目。共用部の旧詳細項目は完了条件に含めない }
+              capacity: { type: integer, minimum: 0, description: 客室の定員。初期値は203=2、204=5、205=4、206=3 }
+              beds:
+                type: array
+                description: 客室のベッド種別と台数。203=ダブル1、204=シングル4+EX1、205=ダブル2、206=シングル2+EX1。
+                items:
+                  type: object
+                  required: [type, count]
+                  properties:
+                    type: { type: string, enum: [single, double, extra] }
+                    count: { type: integer, minimum: 1 }
+    ChecklistItemDefinition:
+      type: object
+      required: [code, label, required, appliesToWorkTypes]
+      properties:
+        code: { type: string }
+        label: { type: string }
+        required: { type: boolean }
+        appliesToWorkTypes:
+          type: array
+          uniqueItems: true
+          description: 客室の作業種別。客室以外は空配列とし、現行の共用部詳細チェックは報告条件に使わない。
+          items: { type: string, enum: [checkout, stay_amenities_only, stay_cleaning] }
+    WorkParticipant:
+      type: object
+      required: [id, name]
+      description: IDはクライアントが作るUUID。同じ作業内で不変。氏名候補IDとは別。
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, minLength: 1 }
+    WorkProgressCorrection:
+      type: object
+      required: [areaKind, areaCode, field, previousValue, correctedValue, correctedByUserId, correctedAt]
+      description: 対象室・対象数・実施数・時刻・完了・最終確認の変更前後を作業履歴へ残す。
+      properties:
+        areaKind: { type: string, enum: [task, room] }
+        areaCode: { type: string }
+        defectId: { type: string, format: uuid, description: field=defectStatusのとき対象のRoomDefectを特定する }
+        field: { type: string, enum: [targetRoomCodes, targetCount, completedCount, startedAt, finishedAt, timeDescription, completed, finalConfirmed, defectStatus] }
+        previousValue: { type: [string, boolean, integer, array, 'null'], items: { type: string } }
+        correctedValue: { type: [string, boolean, integer, array, 'null'], items: { type: string } }
+        correctedByUserId: { type: string }
+        correctedAt: { type: string, format: date-time }
+    WorkImageAttachment:
+      type: object
+      required: [id, mediaType, byteSize, sha256, createdAt]
+      description: 備考に現在添付されている画像。非公開の保存先キーは返さない。
+      properties:
+        id: { type: string, format: uuid }
+        mediaType: { type: string, pattern: '^image/' }
+        byteSize: { type: integer, minimum: 1 }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        createdAt: { type: string, format: date-time }
+    ReportImageSnapshot:
+      type: object
+      required: [imageId, mediaType, byteSize, sha256]
+      description: 送信確定時の画像の固定参照。作業から除外しても報告版の保存期限中は閲覧可能。
+      properties:
+        imageId: { type: string, format: uuid }
+        mediaType: { type: string, pattern: '^image/' }
+        byteSize: { type: integer, minimum: 1 }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+    CreateWorkRecord:
+      type: object
+      required: [workDate, onDutyEmployeeName, staffCount, participants]
+      properties:
+        workDate: { type: string, format: date }
+        onDutyEmployeeName: { type: string, minLength: 1 }
+        staffCount: { type: integer, minimum: 1, maximum: 5 }
+        participants: { type: array, minItems: 1, maxItems: 5, items: { $ref: '#/components/schemas/WorkParticipant' } }
+    WorkArea:
+      type: object
+      description: 客室の選択・宿泊情報・種別別チェック。担当者と作業時刻は持たずWorkTaskProgressに記録する。
+      required: [code, selected, checks, finalConfirmed, defects]
+      properties:
+        code: { type: string }
+        selected: { type: boolean }
+        finalConfirmed: { type: boolean, description: 職員がエアコン停止・窓閉鎖を最終確認したか。チェック・宿泊情報の変更時は再確認する }
+        finalConfirmedByUserId: { type: [string, 'null'], readOnly: true }
+        finalConfirmedAt: { type: [string, 'null'], format: date-time, readOnly: true }
+        defects: { type: array, items: { $ref: '#/components/schemas/RoomDefect' } }
+        checks:
+          type: object
+          description: 客室の現在の作業種別に適用する項目のみ準備判定・報告に含める。旧種別の回答は内部保持。
+          additionalProperties: { type: boolean }
+        checksByWorkType:
+          type: object
+          readOnly: true
+          description: 過去に選択した清掃種別の回答。現在の清掃種別の準備判定には使わない。
+          additionalProperties: { type: object, additionalProperties: { type: boolean } }
+        roomStay:
+          type: object
+          required: [adults, children, workType]
+          properties:
+            adults: { type: integer, minimum: 0 }
+            children: { type: integer, minimum: 0 }
+            workType: { type: string, enum: [checkout, stay_amenities_only, stay_cleaning] }
+            exceptionNote: { type: string }
+    RoomDefect:
+      type: object
+      description: 現地の当日担当職員が報告停止対象と判断した客室の不備を個別IDで保持する。作業記録の作成者だけが当該客室・項目から登録・解消できる。端末発行IDのstatusをopenからresolvedへ変更して解消する。削除・ID再利用・checkCodeとdetailの上書きはしない。登録・解消時刻と操作者はサーバーが記録し、対象チェックと職員最終確認を無効化する。備考は報告停止の自動判定に使わない。
+      required: [id, checkCode, detail, status]
+      properties:
+        id: { type: string, format: uuid, description: 端末で生成し、オフライン再送でも維持する不変ID }
+        checkCode: { type: string, description: 不備の対象となる客室チェック項目 }
+        detail: { type: string, minLength: 1 }
+        status: { type: string, enum: [open, resolved] }
+        createdAt: { type: string, format: date-time, readOnly: true }
+        createdByUserId: { type: string, readOnly: true }
+        resolvedAt: { type: [string, 'null'], format: date-time, readOnly: true }
+        resolvedByUserId: { type: [string, 'null'], readOnly: true }
+    WorkTaskProgress:
+      type: object
+      description: 新版の清掃作業10種類の進捗。洗面周りはwashCorridorに統一し、旧「洗面周り床」用のwashFloorは設けない。複数客室を同じ作業に紐付け、作業間の時間重複を許す。トイレ・洗面の実施件数は設けない。
+      required: [kind, unit, targetRoomCodes, assigneeIds, completed]
+      properties:
+        kind: { type: string, enum: [bedmaking, amenities, roomCleaning, roomCorridor, stairsEntrance, showers, lounge, washbasins, toilets, washCorridor] }
+        unit: { type: integer, enum: [1, 2] }
+        targetRoomCodes: { type: array, uniqueItems: true, items: { type: string }, description: 客室対象の3作業だけに使用。現在対象の客室と作業種別から導出する }
+        targetCount: { type: integer, minimum: 0, maximum: 3, description: トイレ0〜2・シャワー0〜3の清掃対象数。洗面台は全箇所固定で入力しない }
+        completedCount: { type: integer, minimum: 0, maximum: 3, description: シャワーだけの実施箇所数。トイレと洗面台には指定しない }
+        assigneeIds: { type: array, uniqueItems: true, items: { type: string, format: uuid } }
+        startedAt: { type: [string, 'null'], format: date-time }
+        finishedAt: { type: [string, 'null'], format: date-time }
+        timeDescription: { type: string, description: 開始・終了の確定時刻がない場合に入力する進め方・時間の説明。未入力時刻を推測しない }
+        completed: { type: boolean }
+    WorkTaskUpdate:
+      type: object
+      additionalProperties: false
+      description: 作業単位の更新入力。targetRoomCodesは選択客室と清掃種別からサーバーが導出し、要求では受け付けない。
+      required: [kind, assigneeIds, completed]
+      properties:
+        kind: { type: string, enum: [bedmaking, amenities, roomCleaning, roomCorridor, stairsEntrance, showers, lounge, washbasins, toilets, washCorridor] }
+        unit: { type: integer, enum: [1, 2] }
+        targetCount: { type: integer, minimum: 0, maximum: 3, description: トイレ0〜2・シャワー0〜3の清掃対象数 }
+        completedCount: { type: integer, minimum: 0, maximum: 3, description: シャワーだけの実施箇所数 }
+        assigneeIds: { type: array, uniqueItems: true, items: { type: string, format: uuid } }
+        startedAt: { type: [string, 'null'], format: date-time }
+        finishedAt: { type: [string, 'null'], format: date-time }
+        timeDescription: { type: string }
+        completed: { type: boolean }
+    RoomSupplyPlan:
+      type: object
+      description: 入力人数・作業種別からサーバーが導出する表示用の値。端末から確定値として送らない。
+      required: [roomCode, workType, adults, children, totalGuests, adultSlippers, childSlippers, toothbrushes, amenityPlacement]
+      properties:
+        roomCode: { type: string }
+        workType: { type: string, enum: [checkout, stay_amenities_only, stay_cleaning] }
+        adults: { type: integer, minimum: 0 }
+        children: { type: integer, minimum: 0 }
+        totalGuests: { type: integer, minimum: 1 }
+        adultSlippers: { type: integer, minimum: 0 }
+        childSlippers: { type: integer, minimum: 0 }
+        toothbrushes: { type: integer, minimum: 1 }
+        amenityPlacement: { type: string, enum: [room, entrance_shoe_box] }
+        pillows: { type: integer, minimum: 1, description: 通常清掃・連泊清掃のみ返す。人数合計と同数。 }
+    RoomMasterSnapshot:
+      type: object
+      description: 作業が参照する不変のマスタ版から取り出した客室の基本情報。後のベッド変更で書き換えない。
+      required: [roomCode, capacity, beds]
+      properties:
+        roomCode: { type: string }
+        capacity: { type: integer, minimum: 1 }
+        beds:
+          type: array
+          items:
+            type: object
+            required: [type, count]
+            properties:
+              type: { type: string, enum: [single, double, extra] }
+              count: { type: integer, minimum: 1 }
+    WorkRecord:
+      type: object
+      required: [id, contractVersion, revision, workDate, plannedStartTime, actualStartedAt, masterRevisionId, status, hasSentReport, hasUnreportedChanges, onDutyEmployeeName, staffCount, participants, areas, workTasks, images, breakTaken, keyMemo, sheetMemo]
+      properties:
+        id: { type: string }
+        contractVersion: { type: integer, const: 2 }
+        revision: { type: integer, minimum: 1 }
+        workDate: { type: string, format: date }
+        plannedStartTime: { type: string, const: '09:55', description: 固定の予定開始時刻。実際の作業開始はactualStartedAtに1回記録する }
+        actualStartedAt: { type: [string, 'null'], format: date-time, readOnly: true, description: 新規作業では作成時にサーバー時刻を固定。旧記録の移行で元の全体時刻を特定できない場合だけnull }
+        masterRevisionId: { type: string }
+        status: { type: string, enum: [Editing, Ready, Reporting, VerificationNeeded, Completed], description: Completedは送信済み実績。一度成立したら再報告が失敗しても戻さない }
+        hasSentReport: { type: boolean, description: Sentの報告版が1件以上あるか }
+        hasUnreportedChanges: { type: boolean, description: 最新の作業入力に対応する送信済み版がないか }
+        latestReportVersionId: { type: [string, 'null'] }
+        latestReportStatus: { type: [string, 'null'], enum: [Sending, Sent, Failed, Unknown, null] }
+        firstCompletedAt: { type: [string, 'null'], format: date-time }
+        onDutyEmployeeName: { type: string }
+        staffCount: { type: integer, minimum: 1, maximum: 5 }
+        participants: { type: array, items: { $ref: '#/components/schemas/WorkParticipant' } }
+        areas: { type: array, items: { $ref: '#/components/schemas/WorkArea' } }
+        workTasks: { type: array, items: { $ref: '#/components/schemas/WorkTaskProgress' } }
+        images: { type: array, items: { $ref: '#/components/schemas/WorkImageAttachment' }, description: 現在の作業に添付されている画像。追加・除外は専用APIで行う }
+        breakTaken: { type: [boolean, 'null'] }
+        remarks: { type: string }
+        keyMemo: { type: string }
+        sheetMemo: { type: string }
+        legacyMigrationReconfirmedAt: { type: [string, 'null'], format: date-time, readOnly: true, description: 旧未送信記録の作業別入力を作成者が明示的に再確認した時刻 }
+        firstReportButtonPressedAt: { type: [string, 'null'], format: date-time }
+        retentionHold: { type: boolean, description: 送信中・結果不明の版があり、期限後の削除を保留中 }
+        contentPurgedAt: { type: [string, 'null'], format: date-time, readOnly: true, description: 保存期限で作業内容を削除した時刻。以後の更新と報告は410で拒否する }
+    UpdateWorkRecord:
+      type: object
+      required: [revision]
+      description: 当日の担当職員名は作成時に固定し、更新できない。参加者の氏名・表示順と作業入力は既存の権限・整合性規則に従う。
+      properties:
+        revision: { type: integer, minimum: 1 }
+        staffCount: { type: integer, minimum: 1, maximum: 5 }
+        participants: { type: array, minItems: 1, maxItems: 5, items: { $ref: '#/components/schemas/WorkParticipant' } }
+        areas: { type: array, items: { $ref: '#/components/schemas/WorkArea' } }
+        workTasks: { type: array, items: { $ref: '#/components/schemas/WorkTaskUpdate' } }
+        breakTaken: { type: [boolean, 'null'] }
+        remarks: { type: string }
+        keyMemo: { type: string }
+        sheetMemo: { type: string }
+        migrationReconfirmed: { type: boolean, description: 旧未送信記録の新しいworkTasksを同じ更新要求に含め、作成者が再確認した場合だけtrueを送る }
+    WorkSummary:
+      type: object
+      required: [id, workDate, status, hasSentReport, hasUnreportedChanges, archived]
+      properties:
+        id: { type: string }
+        workDate: { type: string, format: date }
+        status: { type: string, enum: [Editing, Ready, Reporting, VerificationNeeded, Completed] }
+        hasSentReport: { type: boolean }
+        hasUnreportedChanges: { type: boolean }
+        latestReportVersionId: { type: [string, 'null'] }
+        latestReportStatus: { type: [string, 'null'], enum: [Sending, Sent, Failed, Unknown, null] }
+        archived: { type: boolean }
+    WorkHistory:
+      type: object
+      required: [id, workDate, actualStartedAt, masterRevisionId, roomMasters, status, hasSentReport, hasUnreportedChanges, participants, areas, workTasks, progressCorrections, images, keyMemo, sheetMemo, reportVersions]
+      properties:
+        id: { type: string }
+        workDate: { type: string, format: date }
+        actualStartedAt: { type: [string, 'null'], format: date-time }
+        masterRevisionId: { type: string, description: この作業の開始時に固定したマスタ版ID }
+        roomMasters: { type: array, items: { $ref: '#/components/schemas/RoomMasterSnapshot' }, description: 対象客室について固定したマスタ版から取得した当時の定員・ベッド構成 }
+        status: { type: string, enum: [Editing, Ready, Reporting, VerificationNeeded, Completed] }
+        hasSentReport: { type: boolean }
+        hasUnreportedChanges: { type: boolean }
+        latestReportVersionId: { type: [string, 'null'] }
+        latestReportStatus: { type: [string, 'null'], enum: [Sending, Sent, Failed, Unknown, null] }
+        participants: { type: array, items: { $ref: '#/components/schemas/WorkParticipant' } }
+        areas: { type: array, items: { $ref: '#/components/schemas/WorkArea' } }
+        workTasks: { type: array, items: { $ref: '#/components/schemas/WorkTaskProgress' } }
+        remarks: { type: string }
+        breakTaken: { type: [boolean, 'null'] }
+        keyMemo: { type: string }
+        sheetMemo: { type: string }
+        progressCorrections: { type: array, items: { $ref: '#/components/schemas/WorkProgressCorrection' } }
+        images: { type: array, items: { $ref: '#/components/schemas/WorkImageAttachment' } }
+        reportVersions: { type: array, items: { $ref: '#/components/schemas/ReportVersion' } }
+    Readiness:
+      type: object
+      description: 対象室が空の客室向け作業は必須判定から外す。客室ゼロ件では客室チェック・最終確認と客室向け3作業を判定しない。全室アメニティのみならベッドメイキング・部屋掃除を判定せず、アメニティセットは必須。共用部作業と休憩回答は引き続き判定する。
+      required: [ready, missing]
+      properties:
+        ready: { type: boolean }
+        missing:
+          type: array
+          description: 画面上で該当客室・作業・項目へ移動できる不足または未解消不備。
+          items:
+            type: object
+            required: [code, message]
+            properties:
+              code: { type: string, enum: [roomStay, roomCheck, roomFinal, roomDefect, taskAssignee, taskTime, taskCompletion, showerCount, breakAnswer] }
+              message: { type: string }
+              roomCode: { type: string }
+              checkCode: { type: string }
+              taskKind: { type: string }
+    ReportVersion:
+      type: object
+      required: [id, workId, sequence, status, format, sourceRevision, masterRevisionId, roomMastersSnapshot, confirmedBody, finalMessageBody, imagesSnapshot, createdAt, sendingStartedAt, sendingDeadlineAt]
+      description: contractVersion=2は新版の作業別写しを持つ。移行前の送信済み版は旧箇所・グループの写しを保持して返す。
+      allOf:
+        - if:
+            required: [contractVersion]
+            properties: { contractVersion: { const: 2 } }
+          then:
+            required: [workTasksSnapshot, actualStartedAtSnapshot, keyMemoSnapshot, sheetMemoSnapshot]
+      properties:
+        id: { type: string }
+        contractVersion: { type: integer, const: 2, description: 新版の報告版に付与。移行前に送信済みの版には付けず元の写しを維持する }
+        workId: { type: string }
+        sequence: { type: integer, minimum: 1, description: 作業ごとの単調増加番号。本文削除後も再利用しない }
+        previousVersionId: { type: [string, 'null'] }
+        status: { type: string, enum: [Sending, Sent, Failed, Unknown] }
+        format: { type: string, enum: [pdf, markdown] }
+        markdownDelivery: { type: [string, 'null'], enum: [body, attachment, null] }
+        sourceRevision: { type: integer, minimum: 1 }
+        masterRevisionId: { type: string, description: 報告確定時に作業が参照した不変のマスタ版ID }
+        roomMastersSnapshot: { type: array, items: { $ref: '#/components/schemas/RoomMasterSnapshot' }, description: 報告確定時の対象客室の定員・ベッド構成。後のマスタ変更でも不変。内容削除後は空配列 }
+        confirmedBody: { type: [string, 'null'], description: 利用者が確認した編集済み本文。保存期限後に削除された版ではnull }
+        finalMessageBody: { type: [string, 'null'], description: 報告ID・過去日付表示・生成報告内容を加えて確定したChatwork本文。保存期限後はnull }
+        imagesSnapshot: { type: array, items: { $ref: '#/components/schemas/ReportImageSnapshot' }, description: PDFに埋め込み、画像ファイルもChatworkへ送る。内容削除後は空配列 }
+        deliveryArtifacts: { type: array, items: { $ref: '#/components/schemas/ReportDeliveryArtifact' }, description: 本文・報告ファイル・各画像の送信結果 }
+        createdAt: { type: string, format: date-time }
+        sendingStartedAt: { type: string, format: date-time, description: 送信開始を永続化した時刻 }
+        sendingDeadlineAt: { type: string, format: date-time, description: 送信開始から5分。期限時は投稿照合後に状態を確定する }
+        sentAt: { type: [string, 'null'], format: date-time }
+        chatworkMessageId: { type: [string, 'null'] }
+        pastDate: { type: boolean }
+        participantsSnapshot: { type: array, items: { $ref: '#/components/schemas/WorkParticipant' }, description: 送信確定時の参加者IDと氏名の写し }
+        areasSnapshot:
+          type: array
+          description: 新版は客室の写し。旧版は当時の箇所別担当・時刻と旧床を含む場合がある。内容削除後は空配列。
+          items:
+            anyOf:
+              - { $ref: '#/components/schemas/WorkArea' }
+              - { type: object, required: [code, selected], properties: { code: { type: string }, selected: { type: boolean } } }
+        areaGroupsSnapshot: { type: array, items: { type: object }, description: 移行前に確定した旧報告版だけが持つ箇所グループの写し }
+        workTasksSnapshot: { type: array, items: { $ref: '#/components/schemas/WorkTaskProgress' }, description: 送信時の作業単位の対象・担当・時刻または説明・完了の写し。内容削除後は空配列 }
+        actualStartedAtSnapshot: { type: [string, 'null'], format: date-time, description: 全体の実開始時刻。内容削除後はnull }
+        keyMemoSnapshot: { type: [string, 'null'], description: 送信時の鍵メモ。内容削除後はnull }
+        sheetMemoSnapshot: { type: [string, 'null'], description: 送信時のシーツメモ。内容削除後はnull }
+        roomSupplyPlansSnapshot: { type: array, items: { $ref: '#/components/schemas/RoomSupplyPlan' }, description: 送信時に導出した備品数と設置場所の写し。内容削除後は空配列 }
+        contentRetentionStatus: { type: string, enum: [indefinite, pendingVerification, untilDeadline, purged] }
+    ReportDeliveryArtifact:
+      type: object
+      required: [number, kind, status]
+      properties:
+        number: { type: integer, minimum: 1 }
+        kind: { type: string, enum: [message, reportFile, imageFile] }
+        imageId: { type: [string, 'null'] }
+        fileName: { type: [string, 'null'] }
+        bytes: { type: [integer, 'null'], maximum: 5242880, description: Chatworkに送る各ファイルは5 MB以下 }
+        sha256: { type: [string, 'null'] }
+        status: { type: string, enum: [Pending, Sending, Sent, Failed, Unknown] }
+        chatworkId: { type: [string, 'null'] }
+    ChatworkSettings:
+      type: object
+      required: [connected, markdownDelivery]
+      properties:
+        connected: { type: boolean }
+        postingAccountName: { type: [string, 'null'] }
+        roomId: { type: [string, 'null'] }
+        roomName: { type: [string, 'null'] }
+        markdownDelivery: { type: string, enum: [body, attachment], default: body }
+        reportTemplate: { type: string }
+    CreateMasterChange:
+      type: object
+      description: 変更候補の下書き。この入力では申請・通知は開始しない。
+      required: [workId, baseRevisionId, candidate, onDutyEmployeeName]
+      properties:
+        workId: { type: string }
+        baseRevisionId: { type: string }
+        candidate: { $ref: '#/components/schemas/MasterCandidate' }
+        onDutyEmployeeName: { type: string, minLength: 1 }
+    MasterCandidate:
+      type: object
+      required: [areas]
+      description: 変更候補。編集に参加していない別職員の確認翌日0:00（日本時間）を適用開始とする。
+      properties:
+        areas:
+          type: array
+          items:
+            type: object
+            required: [code, name, alwaysSelected, hasDryer, checklistItems]
+            properties:
+              code: { type: string }
+              name: { type: string }
+              alwaysSelected: { type: boolean }
+              hasDryer: { type: boolean }
+              checklistItems: { type: array, items: { $ref: '#/components/schemas/ChecklistItemDefinition' } }
+              capacity: { type: integer, minimum: 0 }
+              beds:
+                type: array
+                items:
+                  type: object
+                  required: [type, count]
+                  properties:
+                    type: { type: string, enum: [single, double, extra] }
+                    count: { type: integer, minimum: 1 }
+    MasterChange:
+      type: object
+      required: [id, status, baseRevisionId, attempts]
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [Draft, Ready, AwaitingNotification, Notified, MasterEditing, AwaitingReview, Scheduled, Applied, Withdrawn, ChangeFailed] }
+        baseRevisionId: { type: string }
+        approvalDeclared: { type: boolean, description: 別職員1名の承認取得を申請者が自己申告 }
+        approverEmployeeName: { type: [string, 'null'] }
+        candidateRevision: { type: integer, minimum: 1 }
+        editorUserIds: { type: array, items: { type: string } }
+        reviewerUserId: { type: [string, 'null'] }
+        reviewedAt: { type: [string, 'null'], format: date-time }
+        candidateHash: { type: [string, 'null'] }
+        scheduledRevisionId: { type: [string, 'null'] }
+        effectiveAt: { type: [string, 'null'], format: date-time }
+        withdrawalReason: { type: [string, 'null'] }
+        notificationPostedAt: { type: [string, 'null'], format: date-time }
+        notificationConfirmedAt: { type: [string, 'null'], format: date-time }
+        attempts:
+          type: array
+          items:
+            type: object
+            required: [number, result]
+            properties:
+              number: { type: integer, minimum: 1, maximum: 3 }
+              result: { type: string, enum: [Pending, Sending, Sent, Failed, Unknown] }
+              attemptedAt: { type: [string, 'null'], format: date-time }
+    MasterChangeConflict:
+      type: object
+      required: [code, currentRevisionId]
+      properties:
+        code: { type: string, enum: [stale_base_revision, active_change_exists] }
+        currentRevisionId: { type: string }
+        activeChangeId: { type: [string, 'null'] }
+    CreateLateNotificationEvidence:
+      type: object
+      required: [changeId, roomId, chatworkMessageId, postedAt, evidence]
+      properties:
+        changeId: { type: string }
+        roomId: { type: string, pattern: '^[0-9]+$' }
+        chatworkMessageId: { type: string }
+        postedAt: { type: string, format: date-time }
+        evidence: { type: string, minLength: 1, description: 変更IDを含む投稿との照合根拠 }
+    LateNotificationEvidence:
+      type: object
+      required: [id, changeId, environmentId, baseRevisionId, changeFailedAt, roomId, chatworkMessageId, postedAt, discoveredAt, evidence, notAppliedReason, retainUntil]
+      properties:
+        id: { type: string }
+        changeId: { type: string }
+        notificationId: { type: [string, 'null'] }
+        environmentId: { type: string }
+        baseRevisionId: { type: string }
+        changeFailedAt: { type: string, format: date-time }
+        roomId: { type: string }
+        chatworkMessageId: { type: string }
+        postedAt: { type: string, format: date-time }
+        discoveredAt: { type: string, format: date-time }
+        discoveredByUserId: { type: [string, 'null'], description: 自動検知時はnull }
+        evidence: { type: string }
+        notAppliedReason: { type: string, const: change_already_failed }
+        retainUntil: { type: string, format: date-time, description: 発見から1年 }
+    AppAlert:
+      type: object
+      required: [id, changeId, message, createdAt]
+      properties:
+        id: { type: string }
+        changeId: { type: string }
+        message: { type: string }
+        createdAt: { type: string, format: date-time }
+        acknowledgedAt: { type: [string, 'null'], format: date-time }
