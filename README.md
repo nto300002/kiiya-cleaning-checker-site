@@ -19,3 +19,17 @@
 画面とサーバー処理はSitesのWorker構成を候補とし、永続データをD1、非公開画像・報告生成物をR2で扱う。本人確認、職員限定の閲覧、1分監視・5分照合・日次期限処理、Chatwork OAuthと投稿は**実機検証を通るまで採用確定しない**。既存APIのNode.js/PostgreSQLコードをそのまま配置できる前提は置かない。
 
 関連作業はこのリポジトリのGitHub Issuesで管理します。元リポジトリのIssueや実装状態は変更しません。
+
+## Sites版のIssue
+
+| Issue | 内容 |
+| --- | --- |
+| [#1](https://github.com/nto300002/kiiya-cleaning-checker-site/issues/1) | 構成の成立条件と採用可否 |
+| [#2](https://github.com/nto300002/kiiya-cleaning-checker-site/issues/2) | 職員の本人確認とアクセス規則 |
+| [#3](https://github.com/nto300002/kiiya-cleaning-checker-site/issues/3) | D1スキーマとAPI契約 |
+| [#4](https://github.com/nto300002/kiiya-cleaning-checker-site/issues/4) | R2の画像・報告ファイル・保存期限 |
+| [#5](https://github.com/nto300002/kiiya-cleaning-checker-site/issues/5) | WorkerとChatwork連携 |
+| [#6](https://github.com/nto300002/kiiya-cleaning-checker-site/issues/6) | 監視・遅延照合・日次処理 |
+| [#7](https://github.com/nto300002/kiiya-cleaning-checker-site/issues/7) | 現場向けPWA |
+| [#8](https://github.com/nto300002/kiiya-cleaning-checker-site/issues/8) | 既存データ移行 |
+| [#9](https://github.com/nto300002/kiiya-cleaning-checker-site/issues/9) | 統合受け入れと採用判断 |
