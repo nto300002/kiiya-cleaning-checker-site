@@ -34,4 +34,4 @@
 ## 関連
 Issue #5（報告成果物とCloud Run投稿）、Issue #9（統合受け入れ）。設計: `docs/architecture.md`、`docs/chatwork-token-storage.md`。
 
-受け入れケースの共有版: [コミット`9f85cc1`](https://github.com/nto300002/kiiya-cleaning-checker-site/commit/9f85cc10a2888e01886cf89905f6eeea27f12130)の[`SITE-CHATWORK-01`〜`03`](https://github.com/nto300002/kiiya-cleaning-checker-site/blob/9f85cc10a2888e01886cf89905f6eeea27f12130/docs/sites-test-cases.md)。判定時には実装・配備に使ったSHAと差分も記録する。
+受け入れケースの共有版: [コミット`3e61fdf`](https://github.com/nto300002/kiiya-cleaning-checker-site/commit/3e61fdfa3f5f83a42b57dd7812a7a737882d0c6f)の[`SITE-CHATWORK-01`〜`05`](https://github.com/nto300002/kiiya-cleaning-checker-site/blob/3e61fdfa3f5f83a42b57dd7812a7a737882d0c6f/docs/sites-test-cases.md)。判定時には実装・配備に使ったSHAと差分も記録する。
