@@ -8,11 +8,11 @@
 - [Cloud Tasks](https://docs.cloud.google.com/tasks/docs/create-tasks)は指定時刻に汎用HTTPSエンドポイントへ個別タスクを送れる。[Cloud Scheduler](https://docs.cloud.google.com/scheduler/docs/configuring/cron-job-schedules)は`* * * * *`の毎分実行と日次実行を設定できる。繰り返し実行にはCloud Schedulerを使い、Cloud Tasksは報告・通知単位の遅延配送を担う。
 - [Cloud TasksのHTTPターゲット](https://docs.cloud.google.com/tasks/docs/creating-http-target-tasks)は認証トークンを付けられる。ただしSitesの非公開入口がGoogleのOIDCトークンをそのまま受け付けるとは確認できない。Sites側のサービスアクセス方式、秘密値の受け渡し、受信側の検証と権限を実証する必要がある。
 
-## Sites版の暫定構成
+## 採用方針：案A
 
-1. 報告確定またはマスタ通知確定からの配送・5分後照合をCloud Tasksへ登録する。
-2. 毎分監視と日次の保存期限処理はCloud Schedulerで起動する。
-3. まず検証環境の小さな保護されたSite実行入口へタスクを送る。認証、二重配送、応答喪失、停止からの復帰を確認する。Siteへ安全に接続できなければGCPの専用ワーカーを維持する。
-4. 実測した配信遅延と費用を元構成と比較し、採用可否を決める。
+1. 報告・マスタ通知単位の投稿と5分後照合をCloud Tasksへ登録し、認証付きでCloud Run専用ワーカーへ配送する。
+2. 毎分監視と日次の保存期限処理はCloud SchedulerからCloud Run専用ワーカーを起動する。
+3. ワーカーはサービス認証とジョブ権限を検査するSite内部APIを通じてD1/R2の正本を扱う。トークン更新はSite側が担当し、投稿用アクセストークンだけを確保済みジョブに渡す。
+4. 認証、二重配送、応答喪失、停止からの復帰、配信遅延、ファイル転送時間、費用を検証環境で実測する。
 
-これはドキュメント調査に基づく**推奨設計案**であり、SitesとCloud Tasks／Schedulerの実接続試験は未実施。Chatwork投稿の成功、定期処理の成立、期限処理の完了を示す証跡ではない。
+これは採用する構成方針であり、SitesとCloud Runワーカーの実接続試験は未実施。Chatwork投稿の成功、定期処理の成立、期限処理の完了を示す証跡ではない。

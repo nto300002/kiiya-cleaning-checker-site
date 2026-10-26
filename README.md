@@ -7,7 +7,7 @@
 ## 読む順序
 
 1. [Sites版の業務要件](docs/requirements.md)
-2. [構成と移行境界](docs/architecture.md)
+2. [UIのデモ参照方針](docs/ui-reference.md)と[構成と移行境界](docs/architecture.md)
 3. [データ・API移行設計](docs/data-and-api.md)
 4. [運用・受け入れ](docs/operations-and-acceptance.md)
 5. [未決定事項](docs/decision-log.md)
