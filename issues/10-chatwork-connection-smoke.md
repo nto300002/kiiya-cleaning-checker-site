@@ -28,4 +28,6 @@
 - [ ] 実行日、実行者、Git SHA、Site配備版、接続アカウントID（非公開証跡）、ルーム名、テスト識別子、取得できた投稿ID、結果を記録する。未実施を成功扱いしない。
 
 ## 関連
-Issue #5（報告成果物とCloud Run投稿）、Issue #9（統合受け入れ）。設計: `docs/architecture.md`、`docs/chatwork-token-storage.md`、`docs/sites-test-cases.md`。
+Issue #5（報告成果物とCloud Run投稿）、Issue #9（統合受け入れ）。設計: `docs/architecture.md`、`docs/chatwork-token-storage.md`。
+
+受け入れケースの共有版: [コミット`9f85cc1`](https://github.com/nto300002/kiiya-cleaning-checker-site/commit/9f85cc10a2888e01886cf89905f6eeea27f12130)の[`SITE-CHATWORK-01`〜`03`](https://github.com/nto300002/kiiya-cleaning-checker-site/blob/9f85cc10a2888e01886cf89905f6eeea27f12130/docs/sites-test-cases.md)。判定時には実装・配備に使ったSHAと差分も記録する。
