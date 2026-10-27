@@ -1,6 +1,8 @@
 ## 目的と判定範囲
 案Aの本格的な報告送信に先立ち、指定したChatworkアカウントのOAuth接続、検証用ルームの照合、本文1件のテスト投稿を実証する。これは接続試験であり、Issue #5のPDF・画像送信、結果不明照合、Cloud Run経由の報告送信の完了とは区別する。
 
+試験場所は**既存の本番Site内**であり、別の検証用Siteではない。サーバー側で期限・権限・固定ルームを制限する。検証用ルームへの成功だけでは、業務報告ルームの投稿権限または本番送信設定の`DestinationVerified`を証明しない。後者はIssue #5で別APIから確認する。職員の報告送信可否`DeliveryEnabled`はさらにワーカー経路の受け入れを要する。
+
 紐づけるのは職員一人ひとりのSitesアカウントではなく、アプリの検証用送信設定1件と既存メンバーのChatworkアカウント1件である。現場職員にはChatwork認証を求めず、誰が作業・報告したかはSites側の職員IDで記録する。
 
 ## 実施環境（固定）
@@ -28,10 +30,11 @@
 - [ ] 職員2名以上が別々のSites IDで作成した記録からも、Chatwork接続は同じ1設定・同じ`account_id`を使用し、職員ごとのOAuth認可を求めない。報告本文と作業履歴には各作成者のSites IDが残る。
 - [ ] ルーム名・参加権限をAPIで確認し、サーバー側に固定した検証用ルーム以外への投稿を拒否する。別ルームIDをリクエストしても投稿不可で、Chatwork編集・削除API呼出しがないことを確認する。Chatwork側の広いスコープによる残余リスクを記録する。
 - [ ] 成功時はテスト識別子、APIの`message_id`、画面上の投稿が一致し、重複がない。応答喪失時は`message_id`が得られない前提で「投稿あり／投稿なし／判定不能」と照合根拠を記録し、判定不能を自動再送しない。
+- [ ] 試験の成功後も本番送信設定は`DestinationVerified`にならず、職員の送信ボタンも有効にならない。業務報告ルームのroom ID・名前・投稿権限はIssue #5で本番設定専用APIから別に確認する。
 - [ ] 401・403・429の原因と最終状態を別々に記録し、接続解除・認可失効後は投稿できない。更新を試す場合は更新失敗と再接続も検証する。
 - [ ] 実行日、実行者、Git SHA、Site配備版、接続アカウントID（非公開証跡）、ルーム名、テスト識別子、取得できた投稿ID、結果を記録する。未実施を成功扱いしない。
 
 ## 関連
-Issue #5（報告成果物とCloud Run投稿）、Issue #9（統合受け入れ）。設計: `docs/architecture.md`、`docs/chatwork-token-storage.md`。
+Issue #5（報告成果物とCloud Run投稿）、Issue #9（統合受け入れ）。設計: `docs/architecture.md`、`docs/chatwork-token-storage.md`、`docs/chatwork-screen-and-delivery.md`。
 
 受け入れケースの共有版: [コミット`3e61fdf`](https://github.com/nto300002/kiiya-cleaning-checker-site/commit/3e61fdfa3f5f83a42b57dd7812a7a737882d0c6f)の[`SITE-CHATWORK-01`〜`05`](https://github.com/nto300002/kiiya-cleaning-checker-site/blob/3e61fdfa3f5f83a42b57dd7812a7a737882d0c6f/docs/sites-test-cases.md)。判定時には実装・配備に使ったSHAと差分も記録する。
