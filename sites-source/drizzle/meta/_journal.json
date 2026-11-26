@@ -1,0 +1,118 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1792636486707,
+      "tag": "0000_messy_eddie_brock",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1792636588497,
+      "tag": "0001_far_quasimodo",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792981873349,
+      "tag": "0002_windy_silver_fox",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1793077940630,
+      "tag": "0003_harsh_puff_adder",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1793152800000,
+      "tag": "0005_staff-display-name-history",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1793160000000,
+      "tag": "0006_staff-two-roles",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1793232535165,
+      "tag": "0007_robust_namorita",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1793250000000,
+      "tag": "0008_chatwork-delivery",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1793251000000,
+      "tag": "0009_delivery_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1793595582160,
+      "tag": "0010_report_delivery_artifacts",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1793599539393,
+      "tag": "0011_test_delivery_permits",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1793665578872,
+      "tag": "0012_report_delivery_mode",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1793666759271,
+      "tag": "0013_report_prepared_files",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1793680955041,
+      "tag": "0014_naive_vampiro",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1793681330611,
+      "tag": "0015_quiet_darkhawk",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1793681719668,
+      "tag": "0016_shiny_scream",
+      "breakpoints": true
+    }
+  ]
+}
