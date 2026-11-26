@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `work_changes_work_revision_unique` ON `work_changes` (`work_id`,`revision`);
