@@ -10,6 +10,8 @@ function fixture(expiresSeconds=30) {
  sql.exec(`CREATE TABLE chatwork_delivery_runtime (id TEXT PRIMARY KEY,approved INTEGER,worker_subject TEXT,approval_generation INTEGER,worker_revision TEXT,site_revision TEXT,last_healthy_heartbeat_at INTEGER,report_approved INTEGER);
  CREATE TABLE chatwork_production_settings (id TEXT PRIMARY KEY,version INTEGER,account_id TEXT,room_id TEXT,paused INTEGER);
  CREATE TABLE app_users(id TEXT PRIMARY KEY,active INTEGER,role TEXT,staff_revision INTEGER);
+ CREATE TABLE report_versions(id TEXT PRIMARY KEY,work_id TEXT,format TEXT,snapshot_json TEXT);
+ INSERT INTO report_versions VALUES('report','work','markdown','{"imageIds":[]}');
  CREATE TABLE works(id TEXT PRIMARY KEY,owner_id TEXT);
  CREATE TABLE chatwork_delivery_jobs(id TEXT PRIMARY KEY,kind TEXT,status TEXT,work_id TEXT,report_id TEXT,actor_id TEXT,actor_staff_revision INTEGER,settings_version INTEGER,account_id TEXT,room_id TEXT,lease_id TEXT,lease_until INTEGER,report_manifest_sealed INTEGER,error_code TEXT,updated_at TEXT,message_id TEXT,task_name TEXT,dispatch_attempted_at TEXT);
  CREATE TABLE chatwork_report_artifacts(id TEXT PRIMARY KEY,job_id TEXT,ordinal INTEGER,status TEXT,message_id TEXT,error_code TEXT,updated_at TEXT);

@@ -58,3 +58,11 @@ test("if sealing fails after insertion, the entire new manifest is rolled back",
  assert.equal((sql.prepare("SELECT count(*) AS n FROM chatwork_report_artifacts").get() as {n:number}).n,0);
  assert.equal((sql.prepare("SELECT report_manifest_sealed AS n FROM chatwork_delivery_jobs").get() as {n:number}).n,0);
 });
+test('new snapshots seal only the chosen format and their images',async()=>{
+ for(const format of ['markdown','pdf'] as const){
+  const {sql,db}=fixture(JSON.stringify({imageIds:['img-1','img-2'],deliveryFormat:format}));
+  sql.prepare('UPDATE report_versions SET format=?').run(format);
+  assert.equal(await createReportManifest(db,input),true,format);
+  assert.deepEqual(sql.prepare('SELECT kind,ordinal FROM chatwork_report_artifacts ORDER BY ordinal').all().map(x=>({...x})),[{kind:format==='pdf'?'pdf':'body',ordinal:0},{kind:'image',ordinal:1},{kind:'image',ordinal:2}]);
+ }
+});

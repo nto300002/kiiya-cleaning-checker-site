@@ -12,6 +12,7 @@ import { createReportManifest } from "@/lib/report-manifest";
 import {fetchReportFont,ReportFontError,withPreparationStage} from "@/lib/report-preparation-diagnostics";
 import { workerReportFiles, readWorkerFile } from "@/lib/report-worker-files";
 import { hasStaffAccess } from "@/lib/staff-access";
+import { verificationPathReady } from "@/lib/verification-readiness";
 
 export const runtime = "edge";
 type Context = { params: Promise<{ path: string[] }> };
@@ -37,8 +38,12 @@ async function actor(request: Request): Promise<{ id: string; staffRevision: num
   if (!id) throw new ApiError(401, "サインインしてください");
   if (!await hasStaffAccess(db(), settings.APP_STAFF_USER_IDS, id)) throw new ApiError(403, "このアカウントは利用できません");
   const user = await db().prepare("SELECT active,role,staff_revision FROM app_users WHERE id=?").bind(id).first<any>();
-  if (!user?.active || user.role !== "field") throw new ApiError(403, "現場職員だけが設定できます");
+  if (!user?.active || !["normal", "field"].includes(user.role)) throw new ApiError(403, "このアカウントは利用できません");
   return { id, staffRevision: user.staff_revision };
+}
+async function requireRoomManager(id: string): Promise<void> {
+  const user = await db().prepare("SELECT role FROM app_users WHERE id=? AND active=1").bind(id).first<{ role: string }>();
+  if (user?.role !== "field") throw new ApiError(403, "送信先の設定は現場職員だけが行えます");
 }
 function guard(request: Request, mutation = false): void {
   if (new URL(request.url).origin !== ORIGIN || (mutation && request.headers.get("origin") !== ORIGIN)) throw new ApiError(403, "接続元が一致しません");
@@ -69,10 +74,6 @@ function detail(row: any) {
     roomId: row.room_id, roomName: row.room_name, destinationVerified: !!row.destination_verified,
     paused: !!row.paused, accountConfirmedAt: row.account_confirmed_at, roomConfirmedAt: row.room_confirmed_at,
     deliveryEnabled: false, deliveryReason: "DeliveryPathUnavailable", oauthConfigured: !!(settings.CHATWORK_PRODUCTION_CLIENT_ID && settings.CHATWORK_PRODUCTION_CLIENT_SECRET && settings.CHATWORK_PRODUCTION_TOKEN_KEY) };
-}
-async function verificationReady(): Promise<boolean> {
-  const row = await db().prepare("SELECT approved,worker_subject,approval_generation,worker_revision,site_revision,last_healthy_heartbeat_at FROM chatwork_delivery_runtime WHERE id='production'").first<any>();
-  return !!row?.approved && !!row.worker_subject && Number(row.approval_generation) > 0 && !!row.worker_revision && !!row.site_revision && Number(row.last_healthy_heartbeat_at) >= Date.now() - 180_000;
 }
 function verificationView(job: DeliveryJob, actorId: string, staffRevision: number, row: any) {
   return { verificationId: job.id, requestId: job.request_id, marker: job.marker, status: job.status, messageId: job.message_id,
@@ -338,7 +339,7 @@ async function internal(request: Request, path: string[]): Promise<Response> {
     const job = await db().prepare(`SELECT j.* FROM chatwork_delivery_jobs j JOIN chatwork_production_settings s ON s.id='production'
       WHERE j.id=? AND j.lease_id=? AND j.status='Posting' AND j.lease_until>?
       AND j.settings_version=s.version AND j.account_id=s.account_id AND j.room_id=s.room_id AND s.paused=0
-      AND (j.kind='DestinationVerification' OR (j.kind='ReportDelivery' AND j.delivery_mode='test' AND EXISTS (SELECT 1 FROM chatwork_report_artifacts a WHERE a.id=? AND a.job_id=j.id AND a.status='Posting' AND a.message_id IS NULL) AND EXISTS (SELECT 1 FROM chatwork_test_permits p JOIN app_users u ON u.id=j.actor_id WHERE p.job_id=j.id AND p.actor_id=j.actor_id AND p.staff_revision=j.actor_staff_revision AND u.active=1 AND u.role='field' AND u.staff_revision=j.actor_staff_revision AND p.status='Active' AND p.expires_at>CAST(strftime('%s','now') AS INTEGER)*1000 AND p.worker_subject=? AND p.approval_generation=?)))
+      AND (j.kind='DestinationVerification' OR (j.kind='ReportDelivery' AND j.delivery_mode='test' AND EXISTS (SELECT 1 FROM chatwork_report_artifacts a WHERE a.id=? AND a.job_id=j.id AND a.status='Posting' AND a.message_id IS NULL) AND EXISTS (SELECT 1 FROM chatwork_test_permits p JOIN app_users u ON u.id=j.actor_id WHERE p.job_id=j.id AND p.actor_id=j.actor_id AND p.staff_revision=j.actor_staff_revision AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=j.actor_staff_revision AND p.status='Active' AND p.expires_at>CAST(strftime('%s','now') AS INTEGER)*1000 AND p.worker_subject=? AND p.approval_generation=?)))
       AND EXISTS (SELECT 1 FROM chatwork_delivery_runtime WHERE id='production' AND approved=1 AND worker_subject=? AND approval_generation=?)`)
       .bind(input.jobId, input.leaseId, Date.now(), typeof input.artifactId === "string" ? input.artifactId : null, subject, runtime.approval_generation, subject, runtime.approval_generation).first<DeliveryJob>();
     if (!job) throw new ApiError(409, "リースまたは送信先が変更されました");
@@ -347,7 +348,7 @@ async function internal(request: Request, path: string[]): Promise<Response> {
     const stillAuthorized = await db().prepare(`SELECT 1 FROM chatwork_delivery_jobs j JOIN chatwork_production_settings s ON s.id='production'
       WHERE j.id=? AND j.lease_id=? AND j.status='Posting' AND j.lease_until>?
       AND j.settings_version=s.version AND j.account_id=s.account_id AND j.room_id=s.room_id AND s.paused=0
-      AND (j.kind='DestinationVerification' OR (j.kind='ReportDelivery' AND j.delivery_mode='test' AND EXISTS (SELECT 1 FROM chatwork_report_artifacts a WHERE a.id=? AND a.job_id=j.id AND a.status='Posting' AND a.message_id IS NULL) AND EXISTS (SELECT 1 FROM chatwork_test_permits p JOIN app_users u ON u.id=j.actor_id WHERE p.job_id=j.id AND p.actor_id=j.actor_id AND p.staff_revision=j.actor_staff_revision AND u.active=1 AND u.role='field' AND u.staff_revision=j.actor_staff_revision AND p.status='Active' AND p.expires_at>CAST(strftime('%s','now') AS INTEGER)*1000 AND p.worker_subject=? AND p.approval_generation=?)))
+      AND (j.kind='DestinationVerification' OR (j.kind='ReportDelivery' AND j.delivery_mode='test' AND EXISTS (SELECT 1 FROM chatwork_report_artifacts a WHERE a.id=? AND a.job_id=j.id AND a.status='Posting' AND a.message_id IS NULL) AND EXISTS (SELECT 1 FROM chatwork_test_permits p JOIN app_users u ON u.id=j.actor_id WHERE p.job_id=j.id AND p.actor_id=j.actor_id AND p.staff_revision=j.actor_staff_revision AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=j.actor_staff_revision AND p.status='Active' AND p.expires_at>CAST(strftime('%s','now') AS INTEGER)*1000 AND p.worker_subject=? AND p.approval_generation=?)))
       AND EXISTS (SELECT 1 FROM chatwork_delivery_runtime WHERE id='production' AND approved=1 AND worker_subject=? AND approval_generation=?)`)
       .bind(input.jobId, input.leaseId, Date.now(), typeof input.artifactId === "string" ? input.artifactId : null, subject, runtime.approval_generation, subject, runtime.approval_generation).first();
     if (!stillAuthorized) throw new ApiError(409, "リース、送信先またはワーカーの承認が変更されました");
@@ -432,7 +433,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
     const candidateId=input.candidateId;
     const lookup=()=>db().prepare(`SELECT j.id AS jobId,p.id AS permitId FROM report_snapshot_candidates c
       JOIN works w ON w.id=c.work_id AND w.owner_id=c.actor_id AND w.revision=c.work_revision
-      JOIN app_users u ON u.id=c.actor_id AND u.active=1 AND u.role='field' AND u.staff_revision=c.staff_revision
+      JOIN app_users u ON u.id=c.actor_id AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=c.staff_revision
       JOIN chatwork_delivery_jobs j ON j.report_id=c.id AND j.actor_id=c.actor_id AND j.actor_staff_revision=c.staff_revision AND j.delivery_mode='test'
       JOIN chatwork_test_permits p ON p.job_id=j.id AND p.status='Active' AND p.expires_at>CAST(strftime('%s','now') AS INTEGER)*1000
       JOIN chatwork_production_settings s ON s.id='production' AND s.version=p.settings_version AND s.account_id=p.account_id AND s.room_id=p.room_id AND s.paused=0 AND s.destination_verified=1
@@ -450,7 +451,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
     const input=await value(request),uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     if(typeof input.jobId!=='string'||!uuid.test(input.jobId)||typeof input.permitId!=='string'||!uuid.test(input.permitId)||Object.keys(input).some(key=>!['jobId','permitId'].includes(key)))throw new ApiError(400,'試験準備が不正です');
     if(!settings.BUCKET)throw new ApiError(503,'ファイル保存先を利用できません');
-    const owned=await db().prepare(`SELECT 1 FROM chatwork_delivery_jobs j JOIN chatwork_test_permits p ON p.job_id=j.id JOIN app_users u ON u.id=j.actor_id JOIN works w ON w.id=j.work_id AND w.owner_id=u.id WHERE j.id=? AND p.id=? AND j.actor_id=? AND u.active=1 AND u.role='field' AND u.staff_revision=? AND p.staff_revision=u.staff_revision AND p.status='Active' AND p.expires_at>CAST(strftime('%s','now') AS INTEGER)*1000 AND j.delivery_mode='test'
+    const owned=await db().prepare(`SELECT 1 FROM chatwork_delivery_jobs j JOIN chatwork_test_permits p ON p.job_id=j.id JOIN app_users u ON u.id=j.actor_id JOIN works w ON w.id=j.work_id AND w.owner_id=u.id WHERE j.id=? AND p.id=? AND j.actor_id=? AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=? AND p.staff_revision=u.staff_revision AND p.status='Active' AND p.expires_at>CAST(strftime('%s','now') AS INTEGER)*1000 AND j.delivery_mode='test'
       AND (j.status='DispatchPending' OR (j.status='TestAwaitingRegistration' AND EXISTS (SELECT 1 FROM report_snapshot_candidates c WHERE c.id=j.report_id AND c.status='Active' AND c.work_revision=w.revision AND c.staff_revision=u.staff_revision)))`).bind(input.jobId,input.permitId,id,staffRevision).first();
     if(!owned)throw new ApiError(409,'試験許可または報告の状態を確認してください');
     const diagnosticId=crypto.randomUUID(),log=(...args:string[])=>console.info(...args,diagnosticId);
@@ -461,7 +462,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
       const bytes=await fetchReportFont(fetch,{'OAI-Sites-Authorization':`Bearer ${settings.SITE_ASSET_ACCESS_TOKEN}`},log);
       if(bytes.length>10_000_000)throw new ApiError(503,'PDFフォントが不正です');
       const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new Uint8Array(bytes).buffer)),b=>b.toString(16).padStart(2,'0')).join('');
-      if(digest!=='c2f3b4d463500a2ddcd3849cded1fceeb9fd6d1c32e6cbecd568453ba50fc68f')throw new ApiError(503,'PDFフォントを検証できません');
+      if(digest!=='59db22acee2c4c9e88bac7dbf6555c8be70a212e5e2cc884ae04b24166bd4794')throw new ApiError(503,'PDFフォントを検証できません');
       return bytes;
     };
     let prepared:boolean;
@@ -493,8 +494,9 @@ async function api(request: Request, path: string[]): Promise<Response> {
     if(!registered) throw new ApiError(409,'試験許可または報告の状態を確認してください');
     return reply({registered:true,jobId:input.jobId});
   }
-  if (route === "settings" && method === "GET") return reply({ ...detail(await current()), verificationReady: await verificationReady() });
+  if (route === "settings" && method === "GET") return reply({ ...detail(await current()), verificationReady: await verificationPathReady(db()) });
   if (route === "verify-posting" && method === "POST") {
+    await requireRoomManager(id);
     const input = await value(request), row = await current(); expected(input, row);
     if (typeof input.requestId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.requestId)
       || Object.keys(input).some(key => !["expectedVersion", "requestId"].includes(key))) throw new ApiError(400, "確認投稿の要求が不正です");
@@ -525,6 +527,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
     return reply(verificationView(job, id, staffRevision, await current()));
   }
   if (path[0] === "verifications" && path[1] && path[2] === "resolve" && path.length === 3 && method === "POST") {
+    await requireRoomManager(id);
     const input = await value(request);
     if (input.checked !== true || typeof input.marker !== "string" || !["Sent", "NotSent"].includes(String(input.outcome))
       || Object.keys(input).some(key => !["checked", "marker", "outcome", "messageId"].includes(key))
@@ -536,6 +539,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
     return reply({ saved: true });
   }
   if (path[0] === "verifications" && path[1] && path[2] === "confirm" && path.length === 3 && method === "POST") {
+    await requireRoomManager(id);
     const input = await value(request), row = await current(); expected(input, row);
     if (!await confirmVerification(db(), { id: path[1], actorId: id, staffRevision, expectedVersion: row.version, now: Date.now() }))
       throw new ApiError(409, "投稿結果と送信先を再確認してください");
@@ -544,7 +548,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
   if (route === "oauth/start" && method === "POST") {
     credentials();
     const state = randomSecret(), verifier = randomSecret(48), now = Date.now();
-    const inserted = await db().prepare("INSERT INTO chatwork_production_oauth_attempts (state_hash,actor_id,verifier_cipher,expires_at,created_at) SELECT ?,?,?,?,? FROM app_users WHERE id=? AND active=1 AND role='field' AND staff_revision=?")
+    const inserted = await db().prepare("INSERT INTO chatwork_production_oauth_attempts (state_hash,actor_id,verifier_cipher,expires_at,created_at) SELECT ?,?,?,?,? FROM app_users WHERE id=? AND active=1 AND role IN ('normal','field') AND staff_revision=?")
       .bind(await sha256(state), id, await seal(verifier, settings.CHATWORK_PRODUCTION_TOKEN_KEY!), now + 600_000, new Date().toISOString(), id, staffRevision).run();
     if (!inserted.meta.changes) { await actor(request); throw new ApiError(409, "職員の権限が変更されました"); }
     const response = reply({ authorizeUrl: authorizeUrl(settings.CHATWORK_PRODUCTION_CLIENT_ID!, CALLBACK, state, await sha256(verifier), {files:true}) });
@@ -583,6 +587,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
     return reply(detail(await current()));
   }
   if (route === "room/preview" && method === "POST") {
+    await requireRoomManager(id);
     const input = await value(request), row = await current(); expected(input, row);
     if (!row.account_confirmed) throw new ApiError(409, "送信元を先に確認してください");
     const roomId = String(input.roomId || "");
@@ -597,6 +602,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
     return reply({ candidateId, roomId, roomName: room.name, expiresAt: new Date(expiresAt).toISOString() });
   }
   if (route === "room/confirm" && method === "POST") {
+    await requireRoomManager(id);
     const input = await value(request), row = await current(); expected(input, row);
     if (typeof input.candidateId !== "string") throw new ApiError(400, "確認対象が不正です");
     const candidate = await db().prepare("SELECT * FROM chatwork_room_candidates WHERE id=? AND actor_id=? AND consumed_at IS NULL AND expires_at>?")

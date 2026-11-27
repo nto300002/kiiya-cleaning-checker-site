@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { build } from "esbuild";
@@ -13,8 +14,8 @@ const testEnv: { SITE_ASSET_ACCESS_TOKEN?: string; DB?: D1Database; CHATWORK_PRO
 };
 (globalThis as typeof globalThis & { __kiiyaTestEnv?: typeof testEnv }).__kiiyaTestEnv = testEnv;
 async function route(entry: string) {
-  const result = await build({ entryPoints: [new URL(entry, import.meta.url).pathname], bundle: true, write: false,
-    platform: "node", format: "esm", target: "es2022", tsconfig: new URL("../tsconfig.json", import.meta.url).pathname,
+  const result = await build({ entryPoints: [fileURLToPath(new URL(entry, import.meta.url))], bundle: true, write: false,
+    platform: "node", format: "esm", target: "es2022", tsconfig: fileURLToPath(new URL("../tsconfig.json", import.meta.url)),
     plugins: [{ name: "mock-cloudflare-env", setup(builder) {
       builder.onResolve({ filter: /^@\/lib\/worker-identity$/ }, () => ({ path: "worker-id", namespace: "test-env" }));
       builder.onLoad({ filter: /^worker-id$/, namespace: "test-env" }, () => ({ contents: "export async function verifyWorkerIdentity(token) { return token === 'valid-worker' ? '123456' : token === 'old-worker' ? '999999' : token === 'new-worker' ? '888888' : null }", loader: "js" }));
@@ -54,6 +55,8 @@ function fixture(withSettings = true, onWorkerRead?: (sqlite: DatabaseSync) => v
   sqlite.exec("CREATE TABLE works (id TEXT PRIMARY KEY, day TEXT, owner_id TEXT, revision INTEGER, status TEXT, data_json TEXT, first_pressed_at TEXT, latest_report_id TEXT, created_at TEXT, updated_at TEXT)");
   sqlite.exec("CREATE TABLE images (id TEXT PRIMARY KEY, work_id TEXT, object_key TEXT, file_name TEXT, mime TEXT, bytes INTEGER, uploaded_at TEXT)");
   sqlite.exec("CREATE TABLE report_versions (id TEXT PRIMARY KEY, work_id TEXT, sequence INTEGER, format TEXT, status TEXT, body TEXT, snapshot_json TEXT, created_at TEXT)");
+  sqlite.exec("CREATE TABLE master_revisions (id TEXT PRIMARY KEY, version INTEGER NOT NULL, data_json TEXT NOT NULL, effective_day TEXT NOT NULL, created_at TEXT NOT NULL)");
+  sqlite.exec("CREATE TABLE work_changes (id TEXT PRIMARY KEY, work_id TEXT NOT NULL, actor_id TEXT NOT NULL, revision INTEGER NOT NULL, before_json TEXT NOT NULL, after_json TEXT NOT NULL, changed_at TEXT NOT NULL)");
   sqlite.exec("CREATE TABLE chatwork_oauth_attempts (state_hash TEXT PRIMARY KEY, actor_id TEXT, consumed_at TEXT)");
   let batchQueue: Promise<void> = Promise.resolve();
   const db = {
@@ -110,7 +113,7 @@ test("staff directory hides IDs until opened in UI and name changes are revision
   assert.equal(stranger.status, 403);
 });
 
-test("unregistered login sees only own registration ID; newly appointed staff starts read only", async () => {
+test("unregistered login is denied; newly appointed staff can create own work", async () => {
   const sqlite = fixture();
   const stranger = await app.GET(request("/api/me", "stranger"), context(["me"]));
   assert.equal((await stranger.json() as { active: boolean }).active, false);
@@ -119,8 +122,8 @@ test("unregistered login sees only own registration ID; newly appointed staff st
   sqlite.exec("DELETE FROM app_users WHERE id='worker'");
   const normal = await app.GET(request("/api/me", "worker"), context(["me"]));
   assert.equal((await normal.json() as { role: string }).role, "normal");
-  assert.equal((await app.POST(request("/api/works", "worker", "POST", { day: "2026-10-28" }), context(["works"]))).status, 403);
-  assert.equal((await production.GET(request("/api/chatwork/production/settings", "worker"), context(["settings"]))).status, 403);
+  assert.equal((await app.POST(request("/api/works", "worker", "POST", { day: "2026-10-28" }), context(["works"]))).status, 201);
+  assert.equal((await production.GET(request("/api/chatwork/production/settings", "worker"), context(["settings"]))).status, 200);
   assert.equal((sqlite.prepare("SELECT role FROM app_users WHERE id='worker'").get() as { role: string }).role, "normal");
 });
 
@@ -194,8 +197,8 @@ test("app administrator registers a signed-in candidate as a normal staff member
   assert.equal(registered.status, 201);
   assert.equal((await registered.json() as { role: string }).role, "normal");
   assert.equal((await app.GET(request("/api/me", "stranger"), context(["me"])).then(r => r.json()) as { active: boolean }).active, true);
-  assert.equal((await production.GET(request("/api/chatwork/production/settings", "stranger"), context(["settings"]))).status, 403);
-  assert.equal((await app.POST(request("/api/works", "stranger", "POST", { day: "2026-10-29" }), context(["works"]))).status, 403);
+  assert.equal((await production.GET(request("/api/chatwork/production/settings", "stranger"), context(["settings"]))).status, 200);
+  assert.equal((await app.POST(request("/api/works", "stranger", "POST", { day: "2026-10-29" }), context(["works"]))).status, 201);
   const list = await app.GET(request("/api/users", "manager"), context(["users"]));
   assert.equal((await list.json() as Array<{ id: string }>).some(person => person.id === "stranger"), true);
   assert.equal((sqlite.prepare("SELECT approved_by FROM staff_registration_requests WHERE id='stranger'").get() as { approved_by: string }).approved_by, "manager");
@@ -279,7 +282,7 @@ test("field staff promotes a normal colleague with audit, while the fixed app ad
   assert.equal((await promoted.json() as { role: string }).role, "field");
   assert.equal((await app.GET(request("/api/me", "worker"), context(["me"])).then(r => r.json()) as { role: string }).role, "field");
   assert.equal((await production.GET(request("/api/chatwork/production/settings", "worker"), context(["settings"]))).status, 200);
-  assert.equal((await app.PUT(request("/api/users/manager/role", "worker", "PUT", { role: "normal", expectedStaffRevision: "1" }), context(["users", "manager", "role"]))).status, 409);
+  assert.equal((await app.PUT(request("/api/users/manager/role", "worker", "PUT", { role: "normal", expectedStaffRevision: "1" }), context(["users", "manager", "role"]))).status, 403);
   assert.equal((await app.PUT(request("/api/users/worker/role", "manager", "PUT", { role: "normal", expectedStaffRevision: "1" }), context(["users", "worker", "role"]))).status, 409);
   assert.equal((sqlite.prepare("SELECT COUNT(*) AS n FROM staff_role_changes").get() as { n: number }).n, 1);
 });
@@ -294,7 +297,7 @@ test("demotion removes pending Chatwork attempts and takes effect on the next AP
   assert.equal(demoted.status, 200);
   assert.ok((sqlite.prepare("SELECT consumed_at FROM chatwork_production_oauth_attempts WHERE state_hash='pending'").get() as { consumed_at: string | null }).consumed_at);
   assert.equal((await app.GET(request("/api/me", "worker"), context(["me"])).then(r => r.json()) as { role: string }).role, "normal");
-  assert.equal((await production.GET(request("/api/chatwork/production/settings", "worker"), context(["settings"]))).status, 403);
+  assert.equal((await production.GET(request("/api/chatwork/production/settings", "worker"), context(["settings"]))).status, 200);
   assert.equal((await app.PUT(request("/api/users/manager/display-name", "worker", "PUT", { name: "不可", expectedStaffRevision: "1" }), context(["users", "manager", "display-name"]))).status, 403);
 });
 
@@ -328,11 +331,23 @@ test("normal staff can read another person's work but cannot alter it", async ()
   assert.equal((await app.PUT(request("/api/works/work-a", "worker", "PUT", { revision: 1, data: {} }), context(["works", "work-a"]))).status, 403);
 });
 
-test("only field staff can manage Chatwork, while strangers and normal staff cannot", async () => {
+test("normal staff can rename self but cannot change room, master, or another staff member", async () => {
+  const sqlite = fixture();
+  const self = await app.PUT(request("/api/users/worker/display-name", "worker", "PUT", { name: "新しい職員名", expectedStaffRevision: "1" }), context(["users", "worker", "display-name"]));
+  assert.equal(self.status, 200);
+  assert.equal((sqlite.prepare("SELECT display_name FROM app_users WHERE id='worker'").get() as { display_name: string }).display_name, "新しい職員名");
+  assert.equal((await app.PUT(request("/api/users/manager/display-name", "worker", "PUT", { name: "他人", expectedStaffRevision: "1" }), context(["users", "manager", "display-name"]))).status, 403);
+  assert.equal((await app.POST(request("/api/master/changes", "worker", "POST", { reason: "変更", approverName: "承認者", approved: true }), context(["master", "changes"]))).status, 403);
+  assert.equal((await production.POST(request("/api/chatwork/production/room/preview", "worker", "POST", { roomId: "123", expectedVersion: "0" }), context(["room", "preview"]))).status, 403);
+  assert.equal((await production.POST(request("/api/chatwork/production/room/confirm", "worker", "POST", { candidateId: "missing" }), context(["room", "confirm"]))).status, 403);
+  assert.equal((sqlite.prepare("SELECT COUNT(*) AS n FROM staff_name_changes").get() as { n: number }).n, 1);
+});
+
+test("normal staff can view Chatwork settings, while strangers cannot", async () => {
   const sqlite = fixture();
   const detail = await production.GET(request("/api/chatwork/production/settings", "manager"), context(["settings"]));
   assert.equal(detail.status, 200);
-  assert.equal((await production.GET(request("/api/chatwork/production/settings", "worker"), context(["settings"]))).status, 403);
+  assert.equal((await production.GET(request("/api/chatwork/production/settings", "worker"), context(["settings"]))).status, 200);
   const stranger = await app.GET(request("/api/me", "stranger"), context(["me"]));
   assert.equal(stranger.status, 200);
   assert.equal((await stranger.json() as { active: boolean }).active, false);
@@ -786,10 +801,10 @@ test('snapshot creation recovers lost responses and prevents unauthorized or fen
  assert.equal((await initial.json() as {epoch:number}).epoch,0);
  const advance=await app.POST(request('/api/works/work/report-candidate/fence-scope','manager','POST',{revision:1,expectedEpoch:0}),context([...path,'fence-scope']));
  assert.equal(advance.status,200);
- const late=await app.POST(request('/api/works/work/report-candidate','manager','POST',{requestId:crypto.randomUUID(),revision:1,epoch:0,body:'遅延要求'}),context(path));
+ const late=await app.POST(request('/api/works/work/report-candidate','manager','POST',{requestId:crypto.randomUUID(),revision:1,epoch:0,body:'遅延要求',format:'markdown'}),context(path));
  assert.equal(late.status,409);
  const requestId=crypto.randomUUID();
- const create=(actor:string,id:string,body='編集済み報告')=>app.POST(request('/api/works/work/report-candidate',actor,'POST',{requestId:id,revision:1,epoch:1,body}),context(path));
+ const create=(actor:string,id:string,body='編集済み報告')=>app.POST(request('/api/works/work/report-candidate',actor,'POST',{requestId:id,revision:1,epoch:1,body,format:'markdown'}),context(path));
  assert.equal((await create('worker',crypto.randomUUID())).status,403);
  const first=await create('manager',requestId);assert.equal(first.status,200);
  const candidate=(await first.json() as {candidateId:string}).candidateId;
@@ -852,7 +867,7 @@ test('candidate owner can see the fixed permit and cannot reuse a stale work ver
  assert.equal((await app.GET(request('/api/works/work/report-candidate','worker'),context(path))).status,403);
 });
 
-test('fixed candidate flows through operator permit and owner confirmation without dispatching first',async()=>{
+for (const deliveryFormat of ['markdown', 'pdf'] as const) test(`fixed ${deliveryFormat} candidate flows through preparation and confirmation`,async()=>{
  const sqlite=fixture();const work=makeWork('担当者');
  work.startedAt='2026-11-02T01:00:00Z';work.staffNames=['テスト'];work.roomCodes=[];work.showerTarget=0;work.toiletTarget=0;work.breakAnswer='no';
  for(const id of activeTasks(work)){work.tasks[id].completed=true;work.tasks[id].assignees=['テスト'];work.tasks[id].timeNote='完了';}
@@ -862,7 +877,7 @@ test('fixed candidate flows through operator permit and owner confirmation witho
  INSERT INTO chatwork_delivery_control_audit VALUES ('approval','approve','operator','ok','{}','{"subject":"123456","generation":1,"workerRevision":"worker","siteRevision":"site","imageDigest":"sha256:test"}','now');`);
  Object.assign(testEnv,{DELIVERY_TEST_ACCOUNT_ID:'test-account',DELIVERY_TEST_ROOM_ID:'123',DELIVERY_TRIAL_WORKER_SUBJECT:'123456'});
  const path=['works','work','report-candidate'];
- const created=await app.POST(request('/api/works/work/report-candidate','manager','POST',{requestId:crypto.randomUUID(),revision:1,epoch:0,body:'固定された試験本文'}),context(path));
+ const created=await app.POST(request('/api/works/work/report-candidate','manager','POST',{requestId:crypto.randomUUID(),revision:1,epoch:0,body:'固定された試験本文',format:deliveryFormat}),context(path));
  assert.equal(created.status,200);const candidateId=(await created.json() as {candidateId:string}).candidateId;
  const payload={action:'issue-test-permit',requestId:crypto.randomUUID(),reportId:candidateId,expiresAt:Date.now()+60000,reason:'test',expectedGeneration:1};
  const issued=await production.POST(new Request(`${origin}/api/chatwork/production/internal/control`,{method:'POST',headers:{authorization:'Bearer local-control-secret-for-only-operator','content-type':'application/json'},body:JSON.stringify(payload)}),context(['internal','control']));
@@ -877,6 +892,8 @@ test('fixed candidate flows through operator permit and owner confirmation witho
  const objects=new Map<string,Uint8Array>();Object.assign(testEnv,{SITE_ASSET_ACCESS_TOKEN:"test-site-asset-secret",BUCKET:{async put(k:string,v:Uint8Array){objects.set(k,new Uint8Array(v));return {}},async get(k:string){const v=objects.get(k);return v?{arrayBuffer:async()=>new Uint8Array(v).buffer}:null}}});
  const oldFetch=globalThis.fetch;globalThis.fetch=async(_url,options)=>{assert.equal(new Headers(options?.headers).get('OAI-Sites-Authorization'),'Bearer test-site-asset-secret');return new Response(readFileSync(new URL('../public/assets/fonts/NotoSansJP.ttf',import.meta.url)))};
  try{assert.equal((await production.POST(request('/api/chatwork/production/trial/prepare','manager','POST',job),context(['trial','prepare']))).status,200)}finally{globalThis.fetch=oldFetch;delete (testEnv as Record<string,unknown>).BUCKET;}
+ const artifacts=sqlite.prepare('SELECT kind FROM chatwork_report_artifacts WHERE job_id=? ORDER BY ordinal').all(job.jobId) as {kind:string}[];
+ assert.deepEqual(artifacts.map(a=>a.kind),deliveryFormat==='markdown'?['body']:['pdf']);
  const preparedStatus=await app.GET(request('/api/works/work/report-candidate','manager'),context(path));
  assert.equal((await preparedStatus.json() as {candidate:{trial:{prepared:boolean}}}).candidate.trial.prepared,true);
  assert.equal((await confirm()).status,200);assert.equal((await confirm()).status,200);
@@ -977,7 +994,7 @@ test('only authenticated operators may issue a fixed-destination trial reservati
  assert.deepEqual(historyBody.trial,{jobId:result.jobId,permitId:result.permitId,roomName:'test'});
 
  const register=(user:string)=>production.POST(request('/api/chatwork/production/trial/register',user,'POST',{jobId:result.jobId,permitId:result.permitId}),context(['trial','register']));
- assert.equal((await register('worker')).status,403);
+ assert.equal((await register('worker')).status,409);
  assert.equal((await register('manager')).status,200);
  assert.equal((sqlite.prepare('SELECT report_manifest_sealed FROM chatwork_delivery_jobs').get() as {report_manifest_sealed:number}).report_manifest_sealed,1);
  sqlite.prepare("UPDATE chatwork_production_settings SET token_cipher=?").run(await seal(JSON.stringify({accessToken:'token',refreshToken:'refresh',expiresAt:Date.now()+3600000,scope:'rooms.files:write'}),tokenKey));
@@ -1011,7 +1028,7 @@ test('only authenticated operators may issue a fixed-destination trial reservati
 });
 
 test('report token is bound to the same artifact and current staff before and after retrieval',async()=>{
- for(const change of ["UPDATE chatwork_report_artifacts SET status='Sent',message_id='sent' WHERE id='artifact'; UPDATE chatwork_report_artifacts SET status='Posting' WHERE id='other'", "UPDATE app_users SET active=0 WHERE id='manager'", "UPDATE app_users SET role='normal' WHERE id='manager'", "UPDATE app_users SET staff_revision=staff_revision+1 WHERE id='manager'"]){
+ for(const change of ["UPDATE chatwork_report_artifacts SET status='Sent',message_id='sent' WHERE id='artifact'; UPDATE chatwork_report_artifacts SET status='Posting' WHERE id='other'", "UPDATE app_users SET active=0 WHERE id='manager'", "UPDATE app_users SET role='it' WHERE id='manager'", "UPDATE app_users SET staff_revision=staff_revision+1 WHERE id='manager'"]){
  for(const timing of ['before','during']){
  let armed=false;
  const sqlite=fixture(true,undefined,db=>{if(armed){armed=false;db.exec(change)}});
@@ -1035,6 +1052,7 @@ test('worker report artifact operations require the bound permit and current sub
  const sqlite=fixture();
  Object.assign(testEnv,{DELIVERY_TRIAL_WORKER_SUBJECT:'123456'});
  sqlite.exec(`INSERT INTO works (id,owner_id,latest_report_id) VALUES ('work','manager','report');
+ INSERT INTO report_versions(id,work_id,sequence,format,status,body,snapshot_json,created_at) VALUES('report','work',1,'markdown','Prepared','body','{"imageIds":[]}','now');
  UPDATE chatwork_production_settings SET version=2,account_id='account',room_id='123',paused=0;
  UPDATE chatwork_delivery_runtime SET approved=1,report_approved=0,worker_revision='worker',site_revision='site',last_healthy_heartbeat_at=CAST(strftime('%s','now') AS INTEGER)*1000;
  INSERT INTO chatwork_delivery_control_audit VALUES ('approval','approve','operator','ok','{}','{"subject":"123456","generation":1,"workerRevision":"worker","siteRevision":"site","imageDigest":"digest"}','now');
@@ -1121,7 +1139,6 @@ test('isolated trial owner can download only an unresolved prepared file for man
 
 test('identical concurrent work updates return one success and one conflict',async()=>{
  const sqlite=fixture();
- sqlite.exec("CREATE TABLE work_changes (id TEXT PRIMARY KEY,work_id TEXT NOT NULL,actor_id TEXT NOT NULL,revision INTEGER NOT NULL,before_json TEXT NOT NULL,after_json TEXT NOT NULL,changed_at TEXT NOT NULL,UNIQUE(work_id,revision))");
  const work=makeWork('担当者');
  sqlite.prepare("INSERT INTO works(id,day,owner_id,revision,status,data_json) VALUES('work','2026-11-02','manager',1,'Draft',?)").run(JSON.stringify(work));
  const next={...work,notes:'同一の更新'};
@@ -1147,9 +1164,9 @@ test('report owner can reserve a fixed test delivery without an operator action,
  sqlite.prepare("INSERT INTO works(id,day,owner_id,revision,status,data_json) VALUES('work','2026-11-02','manager',1,'Draft',?)").run(JSON.stringify(work));
  sqlite.exec(`UPDATE chatwork_production_settings SET version=2,account_id='test-account',room_id='123',room_name='試験室',account_confirmed=1,destination_verified=1,paused=0,status='DestinationVerified',token_cipher='cipher'; UPDATE chatwork_delivery_runtime SET approved=1,report_approved=0,worker_revision='worker',site_revision='site',last_healthy_heartbeat_at=CAST(strftime('%s','now') AS INTEGER)*1000; INSERT INTO chatwork_delivery_control_audit VALUES ('approval','approve','operator','ok','{}','{"subject":"123456","generation":1,"workerRevision":"worker","siteRevision":"site","imageDigest":"sha256:test"}','now');`);
  Object.assign(testEnv,{DELIVERY_TEST_ACCOUNT_ID:'test-account',DELIVERY_TEST_ROOM_ID:'123',DELIVERY_TRIAL_WORKER_SUBJECT:'123456'});
- const created=await app.POST(request('/api/works/work/report-candidate','manager','POST',{requestId:crypto.randomUUID(),revision:1,epoch:0,body:'個人情報なし'}),context(['works','work','report-candidate']));const candidate=(await created.json() as {candidateId:string}).candidateId;
+ const created=await app.POST(request('/api/works/work/report-candidate','manager','POST',{requestId:crypto.randomUUID(),revision:1,epoch:0,body:'個人情報なし',format:'markdown'}),context(['works','work','report-candidate']));const candidate=(await created.json() as {candidateId:string}).candidateId;
  const reserve=(user:string)=>production.POST(request('/api/chatwork/production/trial/self-reserve',user,'POST',{candidateId:candidate}),context(['trial','self-reserve']));
- assert.equal((await reserve('worker')).status,403);
+ assert.equal((await reserve('worker')).status,409);
  sqlite.exec("UPDATE app_users SET role='field' WHERE id='worker'");
  assert.equal((await reserve('worker')).status,409);
  assert.equal((sqlite.prepare('SELECT count(*) n FROM chatwork_delivery_jobs').get() as {n:number}).n,0);
@@ -1173,4 +1190,10 @@ test('report owner can reserve a fixed test delivery without an operator action,
   assert.equal((sqlite.prepare('SELECT count(*) n FROM report_snapshot_confirmations').get() as {n:number}).n,1);
  }finally{globalThis.fetch=oldFetch;delete (testEnv as Record<string,unknown>).BUCKET}
  delete (testEnv as Record<string,unknown>).DELIVERY_TEST_ACCOUNT_ID;delete (testEnv as Record<string,unknown>).DELIVERY_TEST_ROOM_ID;delete (testEnv as Record<string,unknown>).DELIVERY_TRIAL_WORKER_SUBJECT;
+});
+
+test('public status distinguishes verification path readiness from report delivery', async()=>{
+ const sqlite=fixture();sqlite.prepare("UPDATE chatwork_delivery_runtime SET approved=1,worker_revision='worker-1',site_revision='site-1',last_healthy_heartbeat_at=? WHERE id='production'").run(Date.now());
+ let response=await app.GET(request('/api/report-delivery-settings','worker'),context(['report-delivery-settings']));let value=await response.json() as any;assert.equal(value.verificationReady,true);assert.equal(value.deliveryEnabled,false);
+ sqlite.prepare("UPDATE chatwork_delivery_runtime SET last_healthy_heartbeat_at=? WHERE id='production'").run(Date.now()-300000);response=await app.GET(request('/api/report-delivery-settings','worker'),context(['report-delivery-settings']));value=await response.json();assert.equal(value.verificationReady,false);
 });

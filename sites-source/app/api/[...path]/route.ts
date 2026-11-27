@@ -1,7 +1,9 @@
 import { env } from "cloudflare:workers";
 import { cleanWork, initialMaster, makeWork, missingForReport, reportBody, todayJst, type WorkData } from "@/lib/domain";
 import { leadNameForNewWork } from "@/lib/lead-name";
+import { resetWork } from "@/lib/work-reset";
 import { publicDeliverySettings } from "@/lib/chatwork-production-store";
+import { verificationPathReady } from "@/lib/verification-readiness";
 import { reportRetryGuard } from "@/lib/report-retry-guard";
 import { readWorkerFile } from "@/lib/report-worker-files";
 import { hasStaffAccess, isAppointedStaff } from "@/lib/staff-access";
@@ -68,11 +70,18 @@ async function master(day: string): Promise<any> {
   return await db().prepare("SELECT * FROM master_revisions WHERE effective_day <= ? ORDER BY effective_day DESC, version DESC LIMIT 1").bind(day).first<any>();
 }
 function parsed(row: any): WorkData { return JSON.parse(row.data_json) as WorkData; }
+function reportMatchesWork(snapshotJson: string, workJson: string): boolean {
+  try {
+    const snapshot = JSON.parse(snapshotJson);
+    delete snapshot.deliveryFormat;
+    return JSON.stringify(snapshot) === JSON.stringify(JSON.parse(workJson));
+  } catch { return false; }
+}
 async function updateWork(row: any, next: WorkData, user: User): Promise<any> {
   const revision = row.revision + 1, now = new Date().toISOString();
   const nextJson = JSON.stringify(next);
   const result = await db().batch([
-    db().prepare("UPDATE works SET data_json=?, revision=?, updated_at=? WHERE id=? AND revision=? AND owner_id=? AND EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role='field')")
+    db().prepare("UPDATE works SET data_json=?, revision=?, updated_at=? WHERE id=? AND revision=? AND owner_id=? AND EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role IN ('normal','field'))")
       .bind(nextJson, revision, now, row.id, row.revision, user.id, user.id),
     db().prepare("INSERT INTO work_changes (id,work_id,actor_id,revision,before_json,after_json,changed_at) SELECT ?,?,?,?,?,?,? WHERE changes()=1 AND EXISTS (SELECT 1 FROM works WHERE id=? AND revision=? AND data_json=?)")
       .bind(crypto.randomUUID(), row.id, user.id, revision, row.data_json, nextJson, now, row.id, revision, nextJson),
@@ -83,10 +92,12 @@ async function updateWork(row: any, next: WorkData, user: User): Promise<any> {
 async function workDetail(id: string): Promise<any> {
   const row = await workRow(id);
   const images = await db().prepare("SELECT id,file_name,mime,bytes,uploaded_at FROM images WHERE work_id=? ORDER BY uploaded_at").bind(id).all<any>();
-  const reports = await db().prepare(`SELECT r.id,r.sequence,r.format,r.status,r.body,r.created_at FROM report_versions r WHERE r.work_id=?
+  const reports = await db().prepare(`SELECT r.id,r.sequence,r.format,r.status,r.body,r.snapshot_json,r.created_at FROM report_versions r WHERE r.work_id=?
     AND NOT EXISTS (SELECT 1 FROM report_snapshot_candidates c WHERE c.id=r.id AND NOT EXISTS (SELECT 1 FROM report_snapshot_confirmations x WHERE x.candidate_id=c.id)) ORDER BY r.sequence DESC`).bind(id).all<any>();
   return { id: row.id, day: row.day, ownerId: row.owner_id, revision: row.revision, status: row.status, firstPressedAt: row.first_pressed_at,
-    data: parsed(row), images: images.results, reports: reports.results, createdAt: row.created_at };
+    data: parsed(row), hasChangesSinceReport: !!reports.results.length && !reportMatchesWork(reports.results[0].snapshot_json, row.data_json),
+    images: images.results.map(({ id, file_name, mime, bytes, uploaded_at }: any) => ({ id, file_name, mime, bytes, uploaded_at })),
+    reports: reports.results.map(({ snapshot_json, ...report }: any) => report), createdAt: row.created_at };
 }
 async function api(request: Request, path: string[]): Promise<Response> {
   const method = request.method;
@@ -103,11 +114,10 @@ async function api(request: Request, path: string[]): Promise<Response> {
     return reply({ ...who, name: row?.display_name || who.name, active: !!row?.active, role: row?.active ? row.role : null, appAdmin: !!row?.active && who.id === env.APP_ADMIN_USER_ID, manageChatwork: !!row?.active && row.role === "field" });
   }
   const user = await staff(request);
-  if (method !== "GET") field(user);
   if (path[0] === "users" && path.length === 1 && method === "GET") {
     const rows = await db().prepare("SELECT id,display_name,role,staff_revision,active FROM app_users ORDER BY display_name").all<any>();
     const visible = (await Promise.all(rows.results.filter(row => !!row.active).map(async row => ({ row, allowed: await hasStaffAccess(db(), env.APP_STAFF_USER_IDS, row.id) })))).filter(item => item.allowed).map(item => item.row);
-    return reply(visible.map(row => user.role === "field"
+    return reply(visible.map(row => user.role === "field" || row.id === user.id
       ? { id: row.id, displayName: row.display_name, role: row.role, appAdmin: row.id === env.APP_ADMIN_USER_ID, staffRevision: String(row.staff_revision), authorized: true }
       : { displayName: row.display_name, role: row.role }));
   }
@@ -163,6 +173,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
     return reply({ id: registrationId, displayName: candidate.display_name, role: "normal" }, 201);
   }
   if (path[0] === "users" && path[1] && path[2] === "role" && path.length === 3 && method === "PUT") {
+    if (user.id !== env.APP_ADMIN_USER_ID) throw new ApiError(403, "アプリ管理者だけが権限を変更できます");
     if (request.headers.get("origin") !== new URL(request.url).origin) throw new ApiError(403, "接続元が一致しません");
     const input = await body(request);
     if (input.role !== "normal" && input.role !== "field") throw new ApiError(400, "権限を確認してください");
@@ -193,6 +204,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
     return reply({ id: target.id, role: input.role, staffRevision: String(target.staff_revision + 1) });
   }
   if (path[0] === "users" && path[1] && path[2] === "display-name" && path.length === 3 && method === "PUT") {
+    if (user.role !== "field" && path[1] !== user.id) throw new ApiError(403, "自分の表示名だけ変更できます");
     if (request.headers.get("origin") !== new URL(request.url).origin) throw new ApiError(403, "接続元が一致しません");
     const input = await body(request);
     const name = typeof input.name === "string" ? input.name.trim() : "";
@@ -204,8 +216,8 @@ async function api(request: Request, path: string[]): Promise<Response> {
     if (name === target.display_name) return reply({ id: target.id, displayName: name, staffRevision: String(target.staff_revision) });
     const now = new Date().toISOString(), changeId = crypto.randomUUID(), nextRevision = target.staff_revision + 1;
     const results = await db().batch([
-      db().prepare("INSERT INTO staff_name_changes (id,staff_id,actor_id,before_name,after_name,changed_at) SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM app_users WHERE id=? AND staff_revision=? AND display_name=?) AND EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role='field')")
-        .bind(changeId, target.id, user.id, target.display_name, name, now, target.id, target.staff_revision, target.display_name, user.id),
+      db().prepare("INSERT INTO staff_name_changes (id,staff_id,actor_id,before_name,after_name,changed_at) SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM app_users WHERE id=? AND staff_revision=? AND display_name=?) AND EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND (role='field' OR id=?))")
+        .bind(changeId, target.id, user.id, target.display_name, name, now, target.id, target.staff_revision, target.display_name, user.id, target.id),
       db().prepare("UPDATE app_users SET display_name=?,staff_revision=? WHERE id=? AND staff_revision=? AND EXISTS (SELECT 1 FROM staff_name_changes WHERE id=?)")
         .bind(name, nextRevision, target.id, target.staff_revision, changeId),
     ]);
@@ -215,7 +227,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
   if (path[0] === "report-delivery-settings" && path.length === 1 && method === "GET") {
     const row = await db().prepare("SELECT status,account_id,display_name,account_confirmed,room_id,room_name,destination_verified,paused,version,refresh_lease_until FROM chatwork_production_settings WHERE id='production'").first<any>();
     if (!row) throw new ApiError(503, "Chatwork本番設定の初期化が必要です");
-    return reply(publicDeliverySettings(row, Date.now()));
+    return reply({ ...publicDeliverySettings(row, Date.now()), verificationReady: await verificationPathReady(db()) });
   }
   if (path[0] === "master" && path.length === 1 && method === "GET") {
     const day = validDay(new URL(request.url).searchParams.get("day") || todayJst());
@@ -228,6 +240,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
       return reply(rows.results);
     }
     if (method === "POST" && path.length === 2) {
+      field(user);
       const v = await body(request);
       const approver = typeof v.approverName === "string" ? v.approverName.trim() : "";
       const reason = typeof v.reason === "string" ? v.reason.trim() : "";
@@ -255,7 +268,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
       await master(day);
       const data = makeWork(leadNameForNewWork(user.id, user.name, env.APP_ADMIN_USER_ID, env.APP_ADMIN_LEAD_NAME));
       try {
-        const inserted = await db().prepare("INSERT INTO works (id,day,owner_id,revision,status,data_json,created_at,updated_at) SELECT ?,?,?,1,'Draft',?,?,? WHERE EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role='field')")
+        const inserted = await db().prepare("INSERT INTO works (id,day,owner_id,revision,status,data_json,created_at,updated_at) SELECT ?,?,?,1,'Draft',?,?,? WHERE EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role IN ('normal','field'))")
           .bind(id, day, user.id, JSON.stringify(data), now, now, user.id).run();
         if (!inserted.meta.changes) throw new ApiError(403, "現場職員だけが操作できます");
       } catch (error) {
@@ -270,21 +283,32 @@ async function api(request: Request, path: string[]): Promise<Response> {
   if (path[0] === "works" && path[1]) {
     const id = path[1], row = await workRow(id);
     if (method !== "GET") owner(user, row);
+    if (path[2] === "revisions" && path[3] && path.length === 4 && method === "GET") {
+      owner(user, row);
+      const revision = Number(path[3]);
+      if (!Number.isInteger(revision) || revision < 1 || revision > row.revision) throw new ApiError(400, "更新番号が不正です");
+      if (revision === row.revision) return reply({ revision, data: parsed(row) });
+      const exact = await db().prepare("SELECT after_json FROM work_changes WHERE work_id=? AND revision=?").bind(id, revision).first<any>();
+      const later = exact ? null : await db().prepare("SELECT before_json FROM work_changes WHERE work_id=? AND revision>? ORDER BY revision ASC LIMIT 1").bind(id, revision).first<any>();
+      const data = exact?.after_json || later?.before_json;
+      if (!data) throw new ApiError(404, "変更前の記録が見つかりません");
+      return reply({ revision, data: JSON.parse(data) });
+    }
     if(path[2]==='report-candidate' && path[3]==='requests' && path.length===5 && method==='GET'){
-      owner(user,row);field(user);
+      owner(user,row);
       if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(path[4]))throw new ApiError(400,'候補の要求が不正です');
       const result=await db().prepare(`SELECT r.status,r.candidate_id FROM report_snapshot_requests r
-        JOIN app_users u ON u.id=r.actor_id AND u.active=1 AND u.role='field'
+        JOIN app_users u ON u.id=r.actor_id AND u.active=1 AND u.role IN ('normal','field')
         WHERE r.id=? AND r.work_id=? AND r.actor_id=?`).bind(path[4],id,user.id).first<{status:string;candidate_id:string|null}>();
       if(!result)throw new ApiError(404,'要求は確認できません。遅延中の可能性があるため再照会してください');
       return reply({status:result.status,candidateId:result.candidate_id});
     }
     if(path[2]==='report-candidate' && (path.length===3 || path.length===4 && ['fence','fence-scope','close'].includes(path[3]))){
-      owner(user,row);field(user);
+      owner(user,row);
       if(method==='GET' && path.length===3){
         const candidate=await db().prepare(`SELECT c.id,c.body,c.snapshot_json,c.work_revision,c.staff_revision,c.status,u.staff_revision AS current_staff_revision FROM report_snapshot_candidates c
           JOIN works w ON w.id=c.work_id AND w.owner_id=c.actor_id JOIN app_users u ON u.id=c.actor_id
-          WHERE c.work_id=? AND c.actor_id=? AND c.status='Active' AND u.active=1 AND u.role='field'`)
+          WHERE c.work_id=? AND c.actor_id=? AND c.status='Active' AND u.active=1 AND u.role IN ('normal','field')`)
           .bind(id,user.id).first<{id:string;body:string;snapshot_json:string;work_revision:number;staff_revision:number;current_staff_revision:number;status:string}>();
         const scope=await db().prepare('SELECT epoch FROM report_snapshot_scopes WHERE work_id=? AND actor_id=?').bind(id,user.id).first<{epoch:number}>();
         const trial=candidate?await db().prepare(`SELECT j.id AS jobId,p.id AS permitId,j.room_name AS roomName,j.status,p.expires_at AS expiresAt,p.status AS permitStatus,
@@ -300,12 +324,12 @@ async function api(request: Request, path: string[]): Promise<Response> {
           AND w.revision=c.work_revision AND u.staff_revision=c.staff_revision THEN 1 ELSE 0 END AS permitValid
           FROM report_snapshot_candidates c JOIN chatwork_delivery_jobs j ON j.report_id=c.id AND j.actor_id=c.actor_id AND j.delivery_mode='test'
           JOIN chatwork_test_permits p ON p.job_id=j.id AND p.actor_id=c.actor_id JOIN works w ON w.id=c.work_id AND w.owner_id=c.actor_id
-          JOIN app_users u ON u.id=c.actor_id AND u.active=1 AND u.role='field'
+          JOIN app_users u ON u.id=c.actor_id AND u.active=1 AND u.role IN ('normal','field')
           JOIN chatwork_production_settings s ON s.id='production' JOIN chatwork_delivery_runtime rt ON rt.id='production'
           WHERE c.id=? AND c.actor_id=?`).bind(candidate.id,user.id).first<{jobId:string;permitId:string;roomName:string;status:string;expiresAt:number;permitStatus:string;permitValid:number;prepared:number}>():null;
         const confirmed=candidate?!!await db().prepare('SELECT 1 FROM report_snapshot_confirmations WHERE candidate_id=? AND actor_id=?').bind(candidate.id,user.id).first():false;
-        const imageIds=candidate?JSON.parse(candidate.snapshot_json).imageIds:[];
-        return reply({epoch:scope?.epoch??0,candidate:candidate?{id:candidate.id,body:candidate.body,imageIds,workRevision:candidate.work_revision,stale:candidate.work_revision!==row.revision || candidate.staff_revision!==candidate.current_staff_revision,confirmed,...(trial?{trial:{...trial,permitValid:!!trial.permitValid,prepared:!!trial.prepared}}:{})}:null});
+        const snapshot=candidate?JSON.parse(candidate.snapshot_json):null;
+        return reply({epoch:scope?.epoch??0,candidate:candidate?{id:candidate.id,body:candidate.body,imageIds:snapshot.imageIds,format:snapshot.deliveryFormat??'legacy',workRevision:candidate.work_revision,stale:candidate.work_revision!==row.revision || candidate.staff_revision!==candidate.current_staff_revision,confirmed,...(trial?{trial:{...trial,permitValid:!!trial.permitValid,prepared:!!trial.prepared}}:{})}:null});
       }
       if(method==='POST'){
         const v=await body(request),uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -326,12 +350,12 @@ async function api(request: Request, path: string[]): Promise<Response> {
           if(!await fenceSnapshotRequest(db(),{requestId:v.requestId,workId:id,actorId:user.id,workRevision:v.revision}))throw new ApiError(409,'候補または作業の状態を確認してください');
           return reply({fenced:true});
         }
-        if(Object.keys(v).some(k=>!['requestId','revision','epoch','body'].includes(k))||!Number.isSafeInteger(v.epoch)||v.epoch<0||typeof v.body!=='string'||!v.body.trim()||v.body.length>50000)throw new ApiError(400,'報告内容が不正です');
+        if(Object.keys(v).some(k=>!['requestId','revision','epoch','body','format'].includes(k))||!['markdown','pdf'].includes(v.format)||!Number.isSafeInteger(v.epoch)||v.epoch<0||typeof v.body!=='string'||!v.body.trim()||v.body.length>50000)throw new ApiError(400,'報告内容または形式が不正です');
         if(v.revision!==row.revision)throw new ApiError(409,'作業が更新されています');
         const data=parsed(row),missing=missingForReport(data);if(missing.length)throw new ApiError(422,'不足項目: '+missing.join('、'));
-        const staff=await db().prepare("SELECT staff_revision FROM app_users WHERE id=? AND active=1 AND role='field'").bind(user.id).first<{staff_revision:number}>();
-        if(!staff)throw new ApiError(403,'現場職員だけが操作できます');
-        const snapshotJson=JSON.stringify(data),material=JSON.stringify({workId:id,actorId:user.id,workRevision:row.revision,staffRevision:staff.staff_revision,body:v.body,snapshotJson});
+        const staff=await db().prepare("SELECT staff_revision FROM app_users WHERE id=? AND active=1 AND role IN ('normal','field')").bind(user.id).first<{staff_revision:number}>();
+        if(!staff)throw new ApiError(403,'利用できないアカウントです');
+        const snapshotJson=JSON.stringify({...data,deliveryFormat:v.format}),material=JSON.stringify({workId:id,actorId:user.id,workRevision:row.revision,staffRevision:staff.staff_revision,body:v.body,snapshotJson});
         const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(material));
         const fingerprint=Array.from(new Uint8Array(bytes),b=>b.toString(16).padStart(2,'0')).join('');
         const result=await reserveSnapshot(db(),{requestId:v.requestId,candidateId:crypto.randomUUID(),workId:id,actorId:user.id,workRevision:row.revision,staffRevision:staff.staff_revision,epoch:v.epoch,fingerprint,body:v.body,snapshotJson});
@@ -340,9 +364,9 @@ async function api(request: Request, path: string[]): Promise<Response> {
       }
     }
     if(path[2]==='reports'&&path[3]&&path[4]==='delivery'&&path[5]==='file'&&path[6]&&path.length===7&&method==='GET'){
-      owner(user,row);field(user);
+      owner(user,row);
       const sql=`SELECT a.id,a.kind,a.status,f.object_key,f.sha256,f.bytes,f.mime,f.file_name FROM chatwork_delivery_jobs j JOIN chatwork_report_artifacts a ON a.job_id=j.id JOIN chatwork_report_prepared_files f ON f.artifact_id=a.id JOIN app_users u ON u.id=j.actor_id JOIN works w ON w.id=j.work_id AND w.owner_id=u.id
-        WHERE j.work_id=? AND j.report_id=? AND j.actor_id=? AND j.delivery_mode='test' AND j.status='Unknown' AND u.active=1 AND u.role='field'
+        WHERE j.work_id=? AND j.report_id=? AND j.actor_id=? AND j.delivery_mode='test' AND j.status='Unknown' AND u.active=1 AND u.role IN ('normal','field')
         AND a.id=? AND a.kind IN ('markdown','pdf','image') AND (a.status='Pending' OR (a.status='Failed' AND a.error_code='MANUALLY_CONFIRMED_NOT_SENT'))
         AND EXISTS(SELECT 1 FROM chatwork_delivery_events e WHERE e.job_id=j.id AND e.action='ReportIsolationConfirmed' AND json_extract(e.detail_json,'$.workerStopped')=1 AND json_extract(e.detail_json,'$.tokenInvalidated')=1 AND json_extract(e.detail_json,'$.requestsEnded')=1)`;
       const args=[id,path[3],user.id,path[6]];
@@ -366,13 +390,13 @@ async function api(request: Request, path: string[]): Promise<Response> {
       const artifacts = await db().prepare(`SELECT a.id,a.kind,a.status,a.error_code FROM chatwork_report_artifacts a
         JOIN chatwork_delivery_jobs j ON j.id=a.job_id JOIN works w ON w.id=j.work_id JOIN app_users u ON u.id=w.owner_id
         WHERE j.id=? AND w.id=? AND u.id=? AND u.active=1 ORDER BY a.ordinal`).bind(job.id,id,user.id).all<{id:string;kind:string;status:string;error_code:string|null}>();
-      const canReconcile=job.delivery_mode==='test' && job.status==='Unknown' && user.role==='field' && !!await db().prepare(`SELECT 1 FROM chatwork_delivery_events WHERE job_id=? AND action='ReportIsolationConfirmed' AND json_extract(detail_json,'$.workerStopped')=1 AND json_extract(detail_json,'$.tokenInvalidated')=1 AND json_extract(detail_json,'$.requestsEnded')=1`).bind(job.id).first();
-      const permit=job.delivery_mode==='test' && user.role==='field' && ['TestAwaitingRegistration','DispatchPending'].includes(job.status)
+      const canReconcile=job.delivery_mode==='test' && job.status==='Unknown' && (user.role==='field'||user.role==='normal') && !!await db().prepare(`SELECT 1 FROM chatwork_delivery_events WHERE job_id=? AND action='ReportIsolationConfirmed' AND json_extract(detail_json,'$.workerStopped')=1 AND json_extract(detail_json,'$.tokenInvalidated')=1 AND json_extract(detail_json,'$.requestsEnded')=1`).bind(job.id).first();
+      const permit=job.delivery_mode==='test' && (user.role==='field'||user.role==='normal') && ['TestAwaitingRegistration','DispatchPending'].includes(job.status)
         ? await db().prepare(`SELECT p.id FROM chatwork_test_permits p JOIN app_users u ON u.id=p.actor_id
           WHERE p.job_id=? AND p.actor_id=? AND p.status='Active' AND p.expires_at>CAST(strftime('%s','now') AS INTEGER)*1000
-          AND u.active=1 AND u.role='field' AND u.staff_revision=p.staff_revision
+          AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=p.staff_revision
           AND (SELECT count(*) FROM chatwork_report_artifacts a JOIN chatwork_report_prepared_files f ON f.artifact_id=a.id WHERE a.job_id=p.job_id)<(SELECT count(*) FROM chatwork_report_artifacts a WHERE a.job_id=p.job_id)
-          OR p.job_id=? AND p.actor_id=? AND p.status='Active' AND p.expires_at>CAST(strftime('%s','now') AS INTEGER)*1000 AND u.active=1 AND u.role='field' AND u.staff_revision=p.staff_revision AND NOT EXISTS(SELECT 1 FROM chatwork_report_artifacts a WHERE a.job_id=p.job_id)`)
+          OR p.job_id=? AND p.actor_id=? AND p.status='Active' AND p.expires_at>CAST(strftime('%s','now') AS INTEGER)*1000 AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=p.staff_revision AND NOT EXISTS(SELECT 1 FROM chatwork_report_artifacts a WHERE a.job_id=p.job_id)`)
           .bind(job.id,user.id,job.id,user.id).first<{id:string}>() : null;
       return reply({status:job.status,reason:job.error_code,artifacts:artifacts.results.map(a=>({kind:a.kind,status:a.status,...(canReconcile&&['Unknown','Failed','Pending'].includes(a.status)?{id:a.id}:{}),...(canReconcile&&a.kind!=='body'&&(a.status==='Pending'||a.status==='Failed'&&a.error_code==='MANUALLY_CONFIRMED_NOT_SENT')?{downloadable:true}:{})})),...(canReconcile?{canReconcile:true,jobId:job.id,roomName:job.room_name}:{}),...(permit?{trial:{jobId:job.id,permitId:permit.id,roomName:job.room_name}}:{})});
     }
@@ -383,6 +407,15 @@ async function api(request: Request, path: string[]): Promise<Response> {
       return new Response(report.body, { headers: { "content-type": "text/markdown; charset=utf-8", "content-disposition": `attachment; filename="kiiya-${row.day}-v${report.sequence}.md"`, "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
     }
     if (path.length === 2 && method === "GET") return reply(await workDetail(id));
+    if (path[2] === "reset" && path.length === 3 && method === "POST") {
+      const v = await body(request);
+      if (row.day !== todayJst()) throw new ApiError(409, "本日以外の作業はリセットできません");
+      if (v.revision !== row.revision) throw new ApiError(409, "更新番号が古くなっています。再読込してください");
+      const data = makeWork(parsed(row).leadName);
+      if (!await resetWork(db(), {workId:id, actorId:user.id, day:todayJst(), revision:row.revision, nextJson:JSON.stringify(data), changeId:crypto.randomUUID(), now:new Date().toISOString()}))
+        throw new ApiError(409, "報告候補や送信状態、または作業の更新を確認してください");
+      return reply(await workDetail(id));
+    }
     if (path.length === 2 && method === "PUT") {
       owner(user, row);
       const v = await body(request);
@@ -412,7 +445,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
     if (path[2] === "press" && method === "POST") {
       owner(user, row);
       const now = new Date().toISOString();
-      const pressed = await db().prepare("UPDATE works SET first_pressed_at=COALESCE(first_pressed_at,?) WHERE id=? AND owner_id=? AND EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role='field')").bind(now, id, user.id, user.id).run();
+      const pressed = await db().prepare("UPDATE works SET first_pressed_at=COALESCE(first_pressed_at,?) WHERE id=? AND owner_id=? AND EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role IN ('normal','field'))").bind(now, id, user.id, user.id).run();
       if (!pressed.meta.changes) throw new ApiError(403, "現場職員だけが操作できます");
       return reply({ firstPressedAt: (await workRow(id)).first_pressed_at });
     }
@@ -428,7 +461,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
       const last = await db().prepare("SELECT MAX(sequence) AS n FROM report_versions WHERE work_id=?").bind(id).first<any>();
       const sequence = Number(last?.n || 0) + 1, reportId = crypto.randomUUID(), now = new Date().toISOString();
       const result = await db().batch([
-        db().prepare(`UPDATE works SET revision=?,status='Prepared',first_pressed_at=COALESCE(first_pressed_at,?),latest_report_id=?,updated_at=? WHERE id=? AND revision=? AND owner_id=? AND EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role='field') AND ${reportRetryGuard}`)
+        db().prepare(`UPDATE works SET revision=?,status='Prepared',first_pressed_at=COALESCE(first_pressed_at,?),latest_report_id=?,updated_at=? WHERE id=? AND revision=? AND owner_id=? AND EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role IN ('normal','field')) AND ${reportRetryGuard}`)
           .bind(row.revision + 1, now, reportId, now, id, row.revision, user.id, user.id),
         db().prepare("INSERT INTO report_versions (id,work_id,sequence,format,status,body,snapshot_json,created_at) SELECT ?,?,?,'markdown','Prepared',?,?,? WHERE EXISTS (SELECT 1 FROM works WHERE id=? AND latest_report_id=? AND revision=?)")
           .bind(reportId, id, sequence, text, JSON.stringify(data), now, id, reportId, row.revision + 1),
@@ -443,7 +476,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
       const imageId = crypto.randomUUID(), key = "works/" + id + "/" + imageId;
       await bucket().put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type }, onlyIf: { etagDoesNotMatch: "*" } });
       try {
-        const saved = await db().prepare("INSERT INTO images (id,work_id,object_key,file_name,mime,bytes,uploaded_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role='field')")
+        const saved = await db().prepare("INSERT INTO images (id,work_id,object_key,file_name,mime,bytes,uploaded_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role IN ('normal','field'))")
           .bind(imageId, id, key, file.name.slice(0, 200), file.type, file.size, new Date().toISOString(), user.id).run();
         if (!saved.meta.changes) throw new ApiError(403, "現場職員だけが操作できます");
       } catch (error) { await bucket().delete(key); throw error; }

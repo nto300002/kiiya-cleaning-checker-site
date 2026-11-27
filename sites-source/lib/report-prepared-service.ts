@@ -11,9 +11,9 @@ export async function prepareStoredReport(db:D1Database,bucket:R2Bucket,loadFont
  AND (j.status='DispatchPending' OR (j.status='TestAwaitingRegistration' AND EXISTS (SELECT 1 FROM report_snapshot_candidates c WHERE c.id=j.report_id AND c.status='Active')))
  AND j.report_manifest_sealed=1
  AND p.status='Active' AND p.expires_at>${now} AND p.actor_id=j.actor_id AND p.staff_revision=j.actor_staff_revision AND p.report_id=j.report_id
- AND p.account_id=j.account_id AND p.room_id=j.room_id AND p.settings_version=j.settings_version AND u.active=1 AND u.role='field' AND u.staff_revision=p.staff_revision
+ AND p.account_id=j.account_id AND p.room_id=j.room_id AND p.settings_version=j.settings_version AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=p.staff_revision
  AND NOT EXISTS (SELECT 1 FROM report_snapshot_candidates c WHERE c.id=j.report_id AND NOT COALESCE(c.status='Active' AND c.work_revision=w.revision AND c.staff_revision=u.staff_revision,0))
- AND s.version=p.settings_version AND s.account_id=p.account_id AND s.room_id=p.room_id AND s.paused=0 AND rv.status='Prepared' AND rv.format='markdown'
+ AND s.version=p.settings_version AND s.account_id=p.account_id AND s.room_id=p.room_id AND s.paused=0 AND rv.status='Prepared' AND rv.format=CASE json_extract(rv.snapshot_json,'$.deliveryFormat') WHEN 'pdf' THEN 'pdf' ELSE 'markdown' END
  AND r.approved=1 AND r.report_approved=0 AND r.worker_subject=p.worker_subject AND r.approval_generation=p.approval_generation AND r.worker_revision=p.worker_revision AND r.site_revision=p.site_revision AND r.last_healthy_heartbeat_at>=${now}-180000`;
  const params=[input.jobId,input.permitId,input.actorId,input.staffRevision];
  const report=await withPreparationStage(log,'report_read',()=>db.prepare(reportQuery).bind(...params).first<{body:string;snapshot_json:string;work_id:string}>());
@@ -45,7 +45,9 @@ export async function prepareStoredReport(db:D1Database,bucket:R2Bucket,loadFont
   sourceImages.push(image);
   images.push({id:image.id,fileName:image.file_name,mime:image.mime,bytes});
  }
- const font=await withPreparationStage(log,'font_fetch',loadFont);
- const artifacts=await withPreparationStage(log,'pdf_generate',()=>prepareReportArtifacts({body:report.body,font,images}));
- return persistReportArtifacts(db,bucket,{...input,artifacts,snapshotJson:report.snapshot_json,sourceImages},log);
+ const format=(snapshot as {deliveryFormat?:unknown}).deliveryFormat;
+ if(format!==undefined && format!=='markdown' && format!=='pdf')return false;
+ const font=format==='markdown'?undefined:await withPreparationStage(log,'font_fetch',loadFont);
+ const artifacts=await withPreparationStage(log,'pdf_generate',()=>prepareReportArtifacts({body:report.body,font,images,format}));
+ return persistReportArtifacts(db,bucket,{...input,artifacts,reportBody:report.body,snapshotJson:report.snapshot_json,sourceImages},log);
 }

@@ -223,7 +223,8 @@ test("作業開始後、終了前の途中経過を保存できる", () => {
   work.tasks.bedmaking.startedAt = "10:00";
   assert.equal(cleanWork(work).tasks.bedmaking.startedAt, "10:00");
   work.tasks.bedmaking.finishedAt = "09:59";
-  assert.throws(() => cleanWork(work), /時刻/);
+  work.roomCodes = ["203"];
+  assert.ok(missingForReport(cleanWork(work)).some(item => item.includes("時刻")));
 });
 test("清掃種別変更後も既存不備の解消履歴を保持する", () => {
   const work = makeWork("担当職員");

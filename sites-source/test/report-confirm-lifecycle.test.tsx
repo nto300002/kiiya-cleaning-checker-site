@@ -16,7 +16,7 @@ test('closing the confirmation during a delayed refresh keeps it closed when the
  const data=makeWork('職員');data.startedAt='2026-11-03T00:00:00Z';data.staffNames=['テスト'];data.breakAnswer='no';data.toiletTarget=0;data.showerTarget=0;
  for(const task of Object.values(data.tasks)){task.completed=true;task.assignees=['テスト'];task.startedAt='09:00';task.finishedAt='09:01'}
  const work={id:'work',day:todayJst(),ownerId:'staff',revision:1,status:'Started',data,images:[],reports:[]};
- const candidate={id:'candidate',body:'試験報告',imageIds:[],workRevision:1,stale:false,confirmed:false};
+ const candidate={id:'candidate',body:'試験報告',format:'markdown',imageIds:[],workRevision:1,stale:false,confirmed:false};
  let calls=0;let release!:()=>void;const pending=new Promise<void>(resolve=>{release=resolve});const requests:string[]=[];
  expose('fetch',async(url:string,init?:RequestInit)=>{
   const path=String(url);requests.push(`${init?.method||'GET'} ${path}`);
@@ -35,7 +35,7 @@ test('closing the confirmation during a delayed refresh keeps it closed when the
  const click=async(label:string)=>{const node=[...dom.window.document.querySelectorAll('button')].find(b=>b.textContent?.trim()===label);assert.ok(node,`button ${label} exists`);assert.equal(node.disabled,false,`${label} is enabled`);await act(async()=>{node.click();await new Promise(r=>setTimeout(r,0))})};
  try{
   await act(async()=>{root.render(<CleaningApp signOutPath="/signout"/>);await new Promise(r=>setTimeout(r,0))});
-  await click('今日の作業を開く →');await click('本日の作業を作成');await click('清掃範囲へ進む →');await click('チェックを始める →');await click('報告内容へ →');await click('報告');
+  await click('本日の作業を作成');await click('報告内容へ →');await click('報告');
   assert.equal(calls,3);assert.ok(dom.window.document.querySelector('[role="dialog"]'));
   await click('閉じる');assert.equal(Boolean(dom.window.document.querySelector('[role="dialog"]')),false);
   await act(async()=>{release();await new Promise(r=>setTimeout(r,0))});

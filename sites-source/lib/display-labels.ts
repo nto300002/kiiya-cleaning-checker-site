@@ -16,3 +16,9 @@ export function statusLabel(value:string):string {
  const labels:Record<string,string>={Draft:'下書き',Prepared:'送信準備済み',Completed:'完了'};
  return labels[value] || '状態を確認できません';
 }
+/** A connected sender does not need a setup callout; retain actionable failures. */
+export function showConnectionNotice(value:Connection|null):boolean {
+ if(!value) return true;
+ if(value.setupReason==='ReconnectRequired'||value.setupReason==='PausedByOperator') return true;
+ return !value.sourceDisplayName;
+}

@@ -1,13 +1,13 @@
 import {withPreparationStage} from './report-preparation-diagnostics.ts';
 type Artifact={kind:'body'|'markdown'|'pdf'|'image';sourceId:string|null;fileName:string|null;mime:string;bytes:Uint8Array};
 type Source={id:string;object_key:string;file_name:string;mime:string;bytes:number};
-type Input={jobId:string;permitId:string;actorId:string;staffRevision:number;artifacts:Artifact[];snapshotJson?:string;sourceImages?:Source[]};
+type Input={jobId:string;permitId:string;actorId:string;staffRevision:number;artifacts:Artifact[];snapshotJson?:string;sourceImages?:Source[];reportBody?:string};
 const now="CAST(strftime('%s','now') AS INTEGER)*1000";
 const preparing=`(j.status='DispatchPending' OR (j.status='TestAwaitingRegistration' AND EXISTS (SELECT 1 FROM report_snapshot_candidates c WHERE c.id=j.report_id AND c.status='Active'))) `;
 const eligible=`EXISTS(SELECT 1 FROM chatwork_test_permits p JOIN app_users u ON u.id=p.actor_id JOIN works w ON w.id=j.work_id AND w.owner_id=u.id AND w.latest_report_id=j.report_id
  JOIN report_versions rv ON rv.id=j.report_id AND rv.work_id=w.id JOIN chatwork_production_settings s ON s.id='production' JOIN chatwork_delivery_runtime r ON r.id='production'
  WHERE p.id=? AND p.job_id=j.id AND p.status='Active' AND p.expires_at>${now} AND p.actor_id=j.actor_id AND p.staff_revision=j.actor_staff_revision
- AND u.active=1 AND u.role='field' AND u.staff_revision=p.staff_revision AND rv.body=? AND rv.snapshot_json=? AND rv.status='Prepared'
+ AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=p.staff_revision AND rv.body=? AND rv.snapshot_json=? AND rv.status='Prepared'
  AND NOT EXISTS (SELECT 1 FROM report_snapshot_candidates c WHERE c.id=j.report_id AND NOT COALESCE(c.status='Active' AND c.work_revision=w.revision AND c.staff_revision=u.staff_revision,0))
  AND NOT EXISTS(SELECT 1 FROM json_each(?) source WHERE NOT EXISTS(SELECT 1 FROM images i WHERE i.id=json_extract(source.value,'$.id') AND i.work_id=j.work_id AND i.object_key=json_extract(source.value,'$.object_key') AND i.file_name=json_extract(source.value,'$.file_name') AND i.mime=json_extract(source.value,'$.mime') AND i.bytes=json_extract(source.value,'$.bytes')))
  AND p.report_id=j.report_id AND p.account_id=j.account_id AND p.room_id=j.room_id AND p.settings_version=j.settings_version
@@ -16,8 +16,8 @@ const eligible=`EXISTS(SELECT 1 FROM chatwork_test_permits p JOIN app_users u ON
  AND r.worker_revision=p.worker_revision AND r.site_revision=p.site_revision AND r.last_healthy_heartbeat_at>=${now}-180000)`;
 async function hash(bytes:Uint8Array){const digest=await crypto.subtle.digest('SHA-256',new Uint8Array(bytes).buffer);return Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('')}
 export async function persistReportArtifacts(db:D1Database,bucket:R2Bucket,input:Input,log:(...args:string[])=>void=()=>{}):Promise<boolean>{
- const body=input.artifacts[0];if(!body||body.kind!=='body'||!input.jobId||!input.permitId||!input.actorId)return false;
- const text=new TextDecoder('utf-8',{fatal:true}).decode(body.bytes);
+ const body=input.artifacts[0];if(!body||!['body','pdf'].includes(body.kind)||!input.jobId||!input.permitId||!input.actorId)return false;
+ const text=input.reportBody??(body.kind==='body'?new TextDecoder('utf-8',{fatal:true}).decode(body.bytes):'');if(!text)return false;
  const sources=input.sourceImages??[];
  if(sources.length!==input.artifacts.filter(item=>item.kind==='image').length)return false;
  const args=[input.jobId,input.actorId,input.staffRevision,input.permitId,text,input.snapshotJson??JSON.stringify({imageIds:[]}),JSON.stringify(sources)];

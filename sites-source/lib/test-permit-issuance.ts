@@ -16,21 +16,21 @@ export async function issueTestPermit(db:D1Database,input:Issue):Promise<{jobId:
  // The candidate's ID becomes the immutable report ID, so no second report can
  // be substituted between the operator's approval and the staff confirmation.
  const report=db.prepare(`INSERT OR IGNORE INTO report_versions(id,work_id,sequence,format,status,body,snapshot_json,created_at)
-  SELECT c.id,c.work_id,COALESCE((SELECT MAX(sequence) FROM report_versions WHERE work_id=c.work_id),0)+1,'markdown','Prepared',c.body,c.snapshot_json,datetime('now')
+  SELECT c.id,c.work_id,COALESCE((SELECT MAX(sequence) FROM report_versions WHERE work_id=c.work_id),0)+1,CASE json_extract(c.snapshot_json,'$.deliveryFormat') WHEN 'pdf' THEN 'pdf' ELSE 'markdown' END,'Prepared',c.body,c.snapshot_json,datetime('now')
   FROM report_snapshot_candidates c JOIN works w ON w.id=c.work_id AND w.owner_id=c.actor_id AND w.revision=c.work_revision
-  JOIN app_users u ON u.id=c.actor_id AND u.active=1 AND u.role='field' AND u.staff_revision=c.staff_revision
+  JOIN app_users u ON u.id=c.actor_id AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=c.staff_revision
   WHERE c.id=? AND c.status='Active' AND (? IS NULL OR c.actor_id=?) AND (? IS NULL OR c.staff_revision=?)`).bind(input.reportId,input.ownerId??null,input.ownerId??null,input.ownerRevision??null,input.ownerRevision??null);
  const latest=db.prepare(`UPDATE works SET latest_report_id=? WHERE id=(SELECT work_id FROM report_snapshot_candidates WHERE id=? AND status='Active')
   AND EXISTS (SELECT 1 FROM report_snapshot_candidates c JOIN report_versions r ON r.id=c.id AND r.work_id=c.work_id
-    JOIN app_users u ON u.id=c.actor_id AND u.active=1 AND u.role='field' AND u.staff_revision=c.staff_revision
+    JOIN app_users u ON u.id=c.actor_id AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=c.staff_revision
     WHERE c.id=? AND c.status='Active' AND c.work_id=works.id AND c.actor_id=works.owner_id AND c.work_revision=works.revision
-    AND r.body=c.body AND r.snapshot_json=c.snapshot_json AND r.status='Prepared' AND r.format='markdown') AND ${reportRetryGuard}`)
+    AND r.body=c.body AND r.snapshot_json=c.snapshot_json AND r.status='Prepared' AND r.format=CASE json_extract(r.snapshot_json,'$.deliveryFormat') WHEN 'pdf' THEN 'pdf' ELSE 'markdown' END) AND ${reportRetryGuard}`)
   .bind(input.reportId,input.reportId,input.reportId);
  const job=db.prepare(`INSERT OR IGNORE INTO chatwork_delivery_jobs(id,kind,request_id,report_id,work_id,actor_id,actor_staff_revision,settings_version,account_id,room_id,room_name,status,delivery_mode,created_at,updated_at)
   SELECT ?,'ReportDelivery',?,r.id,w.id,u.id,u.staff_revision,s.version,s.account_id,s.room_id,s.room_name,'TestAwaitingRegistration','test',datetime('now'),datetime('now')
   FROM report_versions r JOIN works w ON w.id=r.work_id AND w.latest_report_id=r.id JOIN app_users u ON u.id=w.owner_id
   JOIN chatwork_production_settings s ON s.id='production' JOIN chatwork_delivery_runtime rt ON rt.id='production'
-  WHERE r.id=? AND r.status='Prepared' AND r.format='markdown' AND u.active=1 AND u.role='field'
+  WHERE r.id=? AND r.status='Prepared' AND r.format=CASE json_extract(r.snapshot_json,'$.deliveryFormat') WHEN 'pdf' THEN 'pdf' ELSE 'markdown' END AND u.active=1 AND u.role IN ('normal','field')
     AND (? IS NULL OR u.id=?) AND (? IS NULL OR u.staff_revision=?)
     AND NOT EXISTS (SELECT 1 FROM report_snapshot_candidates c WHERE c.id=r.id AND NOT COALESCE(
       c.status='Active' AND c.work_id=w.id AND c.actor_id=u.id AND c.work_revision=w.revision AND c.staff_revision=u.staff_revision

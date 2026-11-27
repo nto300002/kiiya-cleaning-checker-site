@@ -20,7 +20,7 @@ export async function claimReportArtifact(db: D1Database, input: ArtifactAccess)
         WHERE j.id=chatwork_report_artifacts.job_id AND j.kind='ReportDelivery' AND j.delivery_mode='production'
           AND j.report_manifest_sealed=1 AND j.status='Posting' AND j.lease_id=? AND j.lease_until>?
           AND s.version=j.settings_version AND s.account_id=j.account_id AND s.room_id=j.room_id AND s.paused=0
-          AND u.active=1 AND u.role='field' AND u.staff_revision=j.actor_staff_revision
+          AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=j.actor_staff_revision
           AND r.approved=1 AND r.report_approved=1 AND r.worker_subject=? AND r.approval_generation=?)`)
     .bind(new Date(input.now).toISOString(),input.artifactId,input.jobId,input.leaseId,input.now,input.subject,input.generation).run();
   return !!result.meta.changes;

@@ -1,3 +1,4 @@
+import {testReportManifestShape} from './report-manifest-shape.ts';
 type Access = { permitId:string; jobId:string; artifactId:string; leaseId:string; subject:string; generation:number };
 type Control = { permitId:string; operatorId:string; reason:string; expectedGeneration:number; ownerId?:string; ownerRevision?:number };
 type ExpiryControl = Control & { subject:string };
@@ -6,15 +7,13 @@ const dbNow = "CAST(strftime('%s','now') AS INTEGER)*1000";
 export async function claimTestJob(db:D1Database,input:{jobId:string;leaseId:string;subject:string;generation:number}):Promise<boolean>{
  const result=await db.prepare(`UPDATE chatwork_delivery_jobs SET status='Posting',lease_id=?,lease_until=${dbNow}+300000,updated_at=datetime('now')
   WHERE id=? AND kind='ReportDelivery' AND delivery_mode='test' AND report_manifest_sealed=1 AND status IN ('DispatchPending','Dispatched')
-  AND EXISTS(SELECT 1 FROM chatwork_report_artifacts WHERE job_id=chatwork_delivery_jobs.id AND kind='body')
-  AND EXISTS(SELECT 1 FROM chatwork_report_artifacts WHERE job_id=chatwork_delivery_jobs.id AND kind='markdown')
-  AND EXISTS(SELECT 1 FROM chatwork_report_artifacts WHERE job_id=chatwork_delivery_jobs.id AND kind='pdf')
+  AND ${testReportManifestShape}
   AND NOT EXISTS(SELECT 1 FROM chatwork_report_artifacts a WHERE a.job_id=chatwork_delivery_jobs.id AND NOT EXISTS(SELECT 1 FROM chatwork_report_prepared_files f WHERE f.artifact_id=a.id))
   AND EXISTS(SELECT 1 FROM chatwork_test_permits p JOIN chatwork_production_settings s ON s.id='production'
    JOIN chatwork_delivery_runtime r ON r.id='production' JOIN app_users u ON u.id=p.actor_id JOIN works w ON w.id=chatwork_delivery_jobs.work_id AND w.owner_id=u.id
    WHERE p.job_id=chatwork_delivery_jobs.id AND p.status='Active' AND p.expires_at>${dbNow}
    AND p.report_id=chatwork_delivery_jobs.report_id AND p.actor_id=chatwork_delivery_jobs.actor_id AND p.staff_revision=chatwork_delivery_jobs.actor_staff_revision
-   AND u.active=1 AND u.role='field' AND u.staff_revision=p.staff_revision
+   AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=p.staff_revision
    AND p.account_id=chatwork_delivery_jobs.account_id AND p.room_id=chatwork_delivery_jobs.room_id AND p.settings_version=chatwork_delivery_jobs.settings_version
    AND s.account_id=p.account_id AND s.room_id=p.room_id AND s.version=p.settings_version AND s.paused=0
    AND r.approved=1 AND r.report_approved=0 AND r.worker_subject=p.worker_subject AND r.worker_subject=? AND r.approval_generation=p.approval_generation AND r.approval_generation=?
@@ -28,9 +27,7 @@ export async function completeTestJob(db:D1Database,input:{jobId:string;leaseId:
  const result=await db.prepare(`UPDATE chatwork_delivery_jobs SET status='Sent',lease_id=NULL,lease_until=NULL,updated_at=datetime('now')
  WHERE id=? AND kind='ReportDelivery' AND delivery_mode='test' AND status='Posting' AND lease_id=? AND lease_until>${dbNow} AND report_manifest_sealed=1
  AND EXISTS(SELECT 1 FROM chatwork_report_artifacts WHERE job_id=chatwork_delivery_jobs.id)
- AND EXISTS(SELECT 1 FROM chatwork_report_artifacts WHERE job_id=chatwork_delivery_jobs.id AND kind='body')
- AND EXISTS(SELECT 1 FROM chatwork_report_artifacts WHERE job_id=chatwork_delivery_jobs.id AND kind='markdown')
- AND EXISTS(SELECT 1 FROM chatwork_report_artifacts WHERE job_id=chatwork_delivery_jobs.id AND kind='pdf')
+ AND ${testReportManifestShape}
  AND NOT EXISTS(SELECT 1 FROM chatwork_report_artifacts a WHERE a.job_id=chatwork_delivery_jobs.id AND (a.status<>'Sent' OR a.message_id IS NULL))
  AND EXISTS(SELECT 1 FROM chatwork_test_permits p JOIN chatwork_delivery_runtime r ON r.id='production'
  WHERE p.job_id=chatwork_delivery_jobs.id AND p.status='Active' AND p.expires_at>${dbNow} AND r.approved=1 AND r.report_approved=0
@@ -55,7 +52,7 @@ export async function claimTestArtifact(db:D1Database,input:Access):Promise<bool
           AND j.kind='ReportDelivery' AND j.delivery_mode='test' AND j.status='Posting' AND j.report_manifest_sealed=1
           AND j.lease_id=? AND j.lease_until>${dbNow}
           AND p.report_id=j.report_id AND p.actor_id=j.actor_id AND p.staff_revision=j.actor_staff_revision
-          AND u.active=1 AND u.role='field' AND u.staff_revision=p.staff_revision
+          AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=p.staff_revision
           AND p.account_id=j.account_id AND p.room_id=j.room_id AND p.settings_version=j.settings_version
           AND s.version=p.settings_version AND s.account_id=p.account_id AND s.room_id=p.room_id AND s.paused=0
           AND r.approved=1 AND r.report_approved=0 AND r.worker_subject=p.worker_subject AND r.worker_subject=?
@@ -79,7 +76,7 @@ async function closePermit(db:D1Database,input:Control | ExpiryControl,kind:"Rev
   const id=crypto.randomUUID(), status=kind==='Revoke'?'Revoked':'Expired';
   const expiry=kind==='Expire'?` AND expires_at<=${dbNow}`:"";
   const identity=kind==='Expire' ? " AND r.approved=1 AND r.worker_subject=?" : "";
-  const owner=input.ownerId ? ` AND actor_id=? AND staff_revision=? AND EXISTS(SELECT 1 FROM chatwork_delivery_jobs j JOIN app_users u ON u.id=j.actor_id WHERE j.id=chatwork_test_permits.job_id AND j.actor_id=? AND j.actor_staff_revision=? AND j.status='TestAwaitingRegistration' AND j.lease_id IS NULL AND j.message_id IS NULL AND u.active=1 AND u.role='field' AND u.staff_revision=?)` : '';
+  const owner=input.ownerId ? ` AND actor_id=? AND staff_revision=? AND EXISTS(SELECT 1 FROM chatwork_delivery_jobs j JOIN app_users u ON u.id=j.actor_id WHERE j.id=chatwork_test_permits.job_id AND j.actor_id=? AND j.actor_staff_revision=? AND j.status='TestAwaitingRegistration' AND j.lease_id IS NULL AND j.message_id IS NULL AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=?)` : '';
   const auditQuery=db.prepare(`INSERT INTO chatwork_delivery_control_audit(id,action,operator_id,reason,before_json,after_json,created_at)
     SELECT ?,?,?,?,'{}',?,datetime('now') FROM chatwork_test_permits WHERE id=? AND status='Active'${expiry}
       AND EXISTS (SELECT 1 FROM chatwork_delivery_runtime r WHERE r.id='production' AND r.approval_generation=?${identity})${owner}`);

@@ -26,7 +26,7 @@ export async function connectAccount(db: D1Database, input: Connection): Promise
   if (!row) return false;
   const same = row.account_id === input.accountId;
   const results = await db.batch([
-    db.prepare("INSERT INTO chatwork_production_audit (id,actor_id,action,detail_json,created_at) SELECT ?,?,'OAuthConnected',?,? FROM chatwork_production_settings WHERE id='production' AND version=? AND NOT EXISTS (SELECT 1 FROM chatwork_delivery_jobs WHERE status='Posting') AND EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role='field' AND staff_revision=?)")
+    db.prepare("INSERT INTO chatwork_production_audit (id,actor_id,action,detail_json,created_at) SELECT ?,?,'OAuthConnected',?,? FROM chatwork_production_settings WHERE id='production' AND version=? AND NOT EXISTS (SELECT 1 FROM chatwork_delivery_jobs WHERE status='Posting') AND EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role IN ('normal','field') AND staff_revision=?)")
       .bind(input.auditId, input.actorId, JSON.stringify({ accountId: input.accountId, previousVersion: input.expectedVersion }), input.now, input.expectedVersion, input.actorId, input.staffRevision),
     db.prepare("UPDATE chatwork_production_settings SET version=version+1,account_id=?,display_name=?,account_confirmed=?,account_confirmed_by=?,account_confirmed_at=?,room_id=?,room_name=?,room_confirmed_by=NULL,room_confirmed_at=NULL,destination_verified=0,token_cipher=?,token_expires_at=?,token_revision=token_revision+1,refresh_lease_until=NULL,status=?,updated_at=? WHERE id='production' AND version=? AND EXISTS (SELECT 1 FROM chatwork_production_audit WHERE id=?)")
       .bind(input.accountId, input.displayName, same ? row.account_confirmed : 0, same ? row.account_confirmed_by : null,
@@ -39,7 +39,7 @@ export async function connectAccount(db: D1Database, input: Connection): Promise
 
 export async function confirmAccount(db: D1Database, input: AccountConfirmation): Promise<boolean> {
   const results = await db.batch([
-    db.prepare("INSERT INTO chatwork_production_audit (id,actor_id,action,detail_json,created_at) SELECT ?,?,'AccountConfirmed',?,? FROM chatwork_production_settings WHERE id='production' AND version=? AND account_id=? AND account_confirmed=0 AND EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role='field' AND staff_revision=?)")
+    db.prepare("INSERT INTO chatwork_production_audit (id,actor_id,action,detail_json,created_at) SELECT ?,?,'AccountConfirmed',?,? FROM chatwork_production_settings WHERE id='production' AND version=? AND account_id=? AND account_confirmed=0 AND EXISTS (SELECT 1 FROM app_users WHERE id=? AND active=1 AND role IN ('normal','field') AND staff_revision=?)")
       .bind(input.auditId, input.actorId, JSON.stringify({ accountId: input.accountId }), input.now, input.expectedVersion, input.accountId, input.actorId, input.staffRevision),
     db.prepare("UPDATE chatwork_production_settings SET version=version+1,account_confirmed=1,account_confirmed_by=?,account_confirmed_at=?,destination_verified=0,status=CASE WHEN room_id IS NULL THEN 'Unconfigured' ELSE 'DestinationVerificationRequired' END,updated_at=? WHERE id='production' AND version=? AND account_id=? AND account_confirmed=0 AND EXISTS (SELECT 1 FROM chatwork_production_audit WHERE id=?)")
       .bind(input.actorId, input.now, input.now, input.expectedVersion, input.accountId, input.auditId),

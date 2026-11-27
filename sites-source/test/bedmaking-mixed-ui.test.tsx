@@ -1,0 +1,20 @@
+import {test} from 'node:test';import {strict as assert} from 'node:assert';import {JSDOM} from 'jsdom';import React,{act} from 'react';import {createRoot} from 'react-dom/client';import CleaningApp from '../app/cleaning-app.tsx';import {makeWork,todayJst} from '../lib/domain.ts';
+test('mixed rooms separate unperformed and performed tasks',async()=>{
+ const dom=new JSDOM('<!doctype html><div id="root"></div>',{url:'http://localhost/'}),restore=new Map<string,PropertyDescriptor|undefined>();
+ const expose=(key:string,value:unknown)=>{restore.set(key,Object.getOwnPropertyDescriptor(globalThis,key));Object.defineProperty(globalThis,key,{value,configurable:true,writable:true})};
+ for(const key of ['window','document','navigator','localStorage','sessionStorage','HTMLElement','MouseEvent'] as const)expose(key,dom.window[key]);expose('IS_REACT_ACT_ENVIRONMENT',true);dom.window.scrollTo=()=>{};dom.window.HTMLElement.prototype.scrollTo=()=>{};
+ const data=makeWork('職員');data.startedAt='2026-11-10T00:00:00Z';data.staffNames=['テスト'];data.roomCodes=['203','204'];data.rooms['203'].adults=0;
+ const work={id:'work',day:todayJst(),ownerId:'staff',revision:1,status:'Started',data,images:[],reports:[]};
+ expose('fetch',async(url:string,init?:RequestInit)=>{const p=String(url);let v:unknown;if(p==='/api/me')v={id:'staff',name:'職員',active:true,role:'field'};else if(p==='/api/works'&&init?.method==='POST')v=work;else if(p==='/api/works')v=[];else if(p==='/api/report-delivery-settings')v={setupRequired:false,deliveryEnabled:false};else if(p==='/api/works/work')v=work;else throw Error(p);return new Response(JSON.stringify(v),{headers:{'content-type':'application/json'}})});
+ const root=createRoot(dom.window.document.getElementById('root')!);const click=async(label:string)=>{const b=[...dom.window.document.querySelectorAll('button')].find(x=>x.textContent?.trim()===label);assert.ok(b,label);await act(async()=>{b.click();await new Promise(r=>setTimeout(r,0))})};
+ try{await act(async()=>{root.render(<CleaningApp signOutPath="/signout"/>);await new Promise(r=>setTimeout(r,0))});await click('今日の作業を開く →');await click('本日の作業を作成');await click('清掃範囲へ進む →');await click('チェックを始める →');
+ const disclosure=dom.window.document.querySelector('details.missing-top') as HTMLDetailsElement | null;assert.ok(disclosure);assert.equal(disclosure.open,false);const summary=disclosure.querySelector('summary');assert.ok(summary);await act(async()=>summary.click());assert.equal(disclosure.open,true);await act(async()=>summary.click());assert.equal(disclosure.open,false);
+ const label=[...dom.window.document.querySelectorAll('label')].find(x=>x.textContent?.includes('この客室のベッドメイクは未実施'));assert.ok(label);const box=label.querySelector('input');assert.ok(box);await act(async()=>box.click());
+ const reason=[...dom.window.document.querySelectorAll('label')].find(x=>x.textContent?.startsWith('未実施の理由'))?.querySelector('select');const action=dom.window.document.querySelector('input[value=tomorrow_asobe]') as HTMLInputElement | null;assert.ok(reason);assert.ok(action);
+ await act(async()=>{reason.value='staff_shortage';reason.dispatchEvent(new dom.window.Event('change',{bubbles:true}));action.click();});
+ const cards=[...dom.window.document.querySelectorAll('article.work-task')].filter(x=>x.querySelector('h3')?.textContent==='ベッドメイキング');assert.equal(cards.length,2);
+ assert.match(cards[0].textContent||'',/203号室.*未実施/);assert.doesNotMatch(cards[0].textContent||'',/担当者|開始|終了|完了/);
+ assert.match(cards[1].textContent||'',/対象 204号室/);assert.doesNotMatch(cards[1].textContent||'',/203号室/);assert.match(cards[1].textContent||'',/担当者/);
+ await act(async()=>box.click());const restored=[...dom.window.document.querySelectorAll('article.work-task')].filter(x=>x.querySelector('h3')?.textContent==='ベッドメイキング');assert.equal(restored.length,1);assert.match(restored[0].textContent||'',/203号室.*204号室/);assert.match(restored[0].textContent||'',/担当者/);
+ }finally{await act(async()=>root.unmount());dom.window.close();for(const [k,v] of restore)if(v)Object.defineProperty(globalThis,k,v);else Reflect.deleteProperty(globalThis,k)}
+});

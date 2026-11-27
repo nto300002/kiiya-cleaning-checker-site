@@ -16,3 +16,12 @@ test('rejects oversized and malformed content before producing any output',async
  await assert.rejects(prepareReportArtifacts({body:'報告',font,images:[{id:'x',fileName:'x.png',mime:'image/png',bytes:new Uint8Array([1,2,3])}]}));
  await assert.rejects(prepareReportArtifacts({body:'報告',font,images:[{id:'x',fileName:'x.png',mime:'image/png',bytes:png},{id:'x',fileName:'x.png',mime:'image/png',bytes:png}]}));
 });
+test('選択した形式のみを生成し、画像は保持する',async()=>{
+ const images=[{id:'one',fileName:'one.png',mime:'image/png',bytes:png}];
+ const markdown=await prepareReportArtifacts({body:'清掃報告',font,images,format:'markdown'});
+ assert.deepEqual(markdown.map(x=>x.kind),['body','image']);
+ assert.equal(new TextDecoder().decode(markdown[0].bytes),'清掃報告');
+ const pdf=await prepareReportArtifacts({body:'清掃報告',font,images,format:'pdf'});
+ assert.deepEqual(pdf.map(x=>x.kind),['pdf','image']);
+ assert.equal(Buffer.from(pdf[0].bytes.subarray(0,5)).toString(),'%PDF-');
+});

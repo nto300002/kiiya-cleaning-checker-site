@@ -7,7 +7,7 @@ export async function generateReportPdf(input:{body:string;font:Uint8Array;image
  if(typeof input.body!=='string'||!input.body.trim()||input.body.length>100_000||!input.font?.length||!Array.isArray(input.images)||input.images.length>20)throw new Error('Invalid report content');
  if(input.images.some(image=>!['image/jpeg','image/png'].includes(image.mime)||!image.bytes?.length||image.bytes.length>MAX_BYTES))throw new Error('Invalid report image');
  const doc=await PDFDocument.create();doc.registerFontkit(fontkit);
- const font=await doc.embedFont(input.font,{subset:true});
+ const font=await doc.embedFont(input.font,{subset:false});
  const supported=new Set(font.getCharacterSet());
  for(const char of input.body){const code=char.codePointAt(0)!;if(char!=='\n'&&char!=='\r'&&!supported.has(code))throw new Error('Unsupported report character');}
  const width=595.28,height=841.89,margin=42,fontSize=11,lineHeight=18,maxWidth=width-margin*2;

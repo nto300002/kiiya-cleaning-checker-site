@@ -6,7 +6,7 @@ const eligible=`EXISTS (SELECT 1 FROM chatwork_test_permits p JOIN chatwork_prod
  JOIN works w ON w.id=chatwork_delivery_jobs.work_id AND w.owner_id=u.id AND w.latest_report_id=p.report_id
  WHERE p.id=? AND p.job_id=chatwork_delivery_jobs.id AND p.status='Active' AND p.expires_at>${now}
  AND p.actor_id=chatwork_delivery_jobs.actor_id AND p.staff_revision=chatwork_delivery_jobs.actor_staff_revision
- AND u.active=1 AND u.role='field' AND u.staff_revision=p.staff_revision
+ AND u.active=1 AND u.role IN ('normal','field') AND u.staff_revision=p.staff_revision
  AND NOT EXISTS (SELECT 1 FROM report_snapshot_candidates c WHERE c.id=p.report_id AND NOT COALESCE(
    c.status='Active' AND c.work_id=w.id AND c.actor_id=u.id AND c.work_revision=w.revision AND c.staff_revision=u.staff_revision,0))
  AND p.report_id=chatwork_delivery_jobs.report_id AND p.account_id=chatwork_delivery_jobs.account_id AND p.room_id=chatwork_delivery_jobs.room_id AND p.settings_version=chatwork_delivery_jobs.settings_version

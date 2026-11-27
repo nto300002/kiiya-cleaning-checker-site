@@ -141,7 +141,7 @@ test('a permitted reservation remains unclaimable before the owner confirms even
  assert.equal((sql.prepare("SELECT status FROM chatwork_delivery_jobs WHERE id='job'").get() as {status:string}).status,'TestAwaitingRegistration');
 });
 test('issuance fails closed on changed authorization and rolls back partial writes',async()=>{
- for(const change of ["UPDATE chatwork_delivery_runtime SET worker_subject='other'","UPDATE app_users SET staff_revision=2,role='normal'","UPDATE chatwork_delivery_runtime SET report_approved=1","UPDATE chatwork_production_settings SET paused=1","DELETE FROM chatwork_delivery_control_audit"]){const {sql,db}=fixture();sql.exec(change);assert.equal(await issueTestPermit(db,input),null);assert.equal((sql.prepare('SELECT count(*) n FROM chatwork_delivery_jobs').get() as {n:number}).n,0)}
+ for(const change of ["UPDATE chatwork_delivery_runtime SET worker_subject='other'","UPDATE app_users SET staff_revision=2,active=0","UPDATE chatwork_delivery_runtime SET report_approved=1","UPDATE chatwork_production_settings SET paused=1","DELETE FROM chatwork_delivery_control_audit"]){const {sql,db}=fixture();sql.exec(change);assert.equal(await issueTestPermit(db,input),null);assert.equal((sql.prepare('SELECT count(*) n FROM chatwork_delivery_jobs').get() as {n:number}).n,0)}
  {const {db}=fixture();assert.equal(await issueTestPermit(db,{...input,trialWorkerSubject:'other'}),null)}
  const {sql,db,fail}=fixture();fail();await assert.rejects(issueTestPermit(db,input));assert.equal((sql.prepare('SELECT count(*) n FROM chatwork_delivery_jobs').get() as {n:number}).n,0);
 });
