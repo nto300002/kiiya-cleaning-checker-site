@@ -51,32 +51,6 @@ function StaffCard({ staff, canEditName, canChangeRole, onSaved }: { staff: Staf
 
 export default function StaffDirectory({ onOwnNameChanged, ownId, canManage, canRegister }: { onOwnNameChanged: () => void; ownId: string; canManage: boolean; canRegister: boolean }) {
   const [staff, setStaff] = useState<Staff[]>([]);
-  const [exporting, setExporting] = useState(false);
-  const [exportMessage, setExportMessage] = useState("");
-  const [exportChecksum, setExportChecksum] = useState<{ filename: string; text: string } | null>(null);
-  function download(blob: Blob, filename: string) {
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
-  }
-  async function exportAll() {
-    setExportMessage(""); setExportChecksum(null); setExporting(true);
-    try {
-      const response = await fetch("/api/admin/export", { cache: "no-store" });
-      if (!response.ok) {
-        const detail = await response.json().catch(() => null) as { error?: string } | null;
-        throw new Error(detail?.error || `全件データを取得できませんでした（${response.status}）`);
-      }
-      const filename = /filename="([^"]+)"/.exec(response.headers.get("Content-Disposition") || "")?.[1] || "kiiya-cleaning.zip";
-      const bytes = await response.arrayBuffer();
-      const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), byte => byte.toString(16).padStart(2, "0")).join("");
-      download(new Blob([bytes], { type: "application/zip" }), filename);
-      setExportChecksum({ filename: filename.replace(/\.zip$/, ".sha256"), text: `${hash}  ${filename}\n` });
-      setExportMessage("業務レコード、テーブル構造、画像をダウンロードしました。照合用ファイルも保存してください。");
-    } catch (cause) { setExportMessage(cause instanceof Error ? cause.message : "出力できませんでした"); }
-    finally { setExporting(false); }
-  }
   const [error, setError] = useState("");
   const [registrationId, setRegistrationId] = useState("");
   const [candidate, setCandidate] = useState<Candidate | null>(null);
@@ -134,7 +108,6 @@ export default function StaffDirectory({ onOwnNameChanged, ownId, canManage, can
     }).catch(reason => setError(reason instanceof Error ? reason.message : "職員台帳を読み込めません"));
   }, []);
   return <section className="section">
-    {canRegister && <section className="section" aria-labelledby="export-heading"><h2 id="export-heading">全件データのダウンロード</h2><p>清掃作業・報告・画像・マスタ履歴などの業務レコード、全テーブルの構造と件数、R2 の画像本体を ZIP に保存します。認証・連携トークンの値は含みません。</p><button className="button primary" type="button" disabled={exporting} onClick={() => void exportAll()}>{exporting ? "作成中…" : "全レコードとテーブル構造をダウンロード"}</button>{exportChecksum && <button className="button secondary" type="button" onClick={() => download(new Blob([exportChecksum.text], { type: "text/plain" }), exportChecksum.filename)}>照合用 SHA-256 を保存</button>}{exportMessage && <p role="status">{exportMessage}</p>}</section>}
     <p className="section-copy">自分の表示名を変更できます。他職員の表示名は現場職員、権限と利用登録はアプリ管理者が変更できます。</p>
     {canRegister && <div className="select-card"><h2>新しい職員を登録</h2><p className="section-copy">本人が自分のアカウントでアプリを開き、表示された登録用IDを受け取ってください。氏名だけで登録せず、本人とIDを照合します。</p>
       <label className="field"><span className="field-label">登録用ID</span><input value={registrationId} maxLength={512} autoComplete="off" placeholder="本人から受け取った登録用ID" onChange={event => { setRegistrationId(event.target.value); setCandidate(null); setConfirmed(false); setRegistrationMessage(""); }}/></label>
