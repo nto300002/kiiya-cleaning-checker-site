@@ -1,13 +1,15 @@
 import { env } from "cloudflare:workers";
+import { getAuthenticatedUser } from "@/app/chatgpt-auth";
+import { resolveAppOrigin } from "@/lib/google-oidc-core.mjs";
 import { hasStaffAccess } from "@/lib/staff-access";
 import { authorizeUrl, chatworkMe, chatworkRoom, ChatworkHttpError, completedOAuthRedirect, exchangeCode, postTestMessage, randomSecret, refreshToken, seal, sha256, unseal, type TokenBundle } from "@/lib/chatwork";
 
 export const runtime = "edge";
 type Context = { params: Promise<{ path: string[] }> };
-type SmokeEnv = { DB?: D1Database; APP_ENV?: string; CHATWORK_SMOKE_ENABLED?: string; CHATWORK_SMOKE_EXPIRES_AT?: string; CHATWORK_SMOKE_CLIENT_ID?: string; CHATWORK_SMOKE_CLIENT_SECRET?: string; CHATWORK_SMOKE_TOKEN_KEY?: string; CHATWORK_SMOKE_ROOM_ID?: string; APP_STAFF_USER_IDS?: string };
+type SmokeEnv = { DB?: D1Database; APP_ENV?: string; APP_ORIGIN?: string; CHATWORK_SMOKE_ENABLED?: string; CHATWORK_SMOKE_EXPIRES_AT?: string; CHATWORK_SMOKE_CLIENT_ID?: string; CHATWORK_SMOKE_CLIENT_SECRET?: string; CHATWORK_SMOKE_TOKEN_KEY?: string; CHATWORK_SMOKE_ROOM_ID?: string; APP_STAFF_USER_IDS?: string };
 const settings = env as unknown as SmokeEnv;
-const ORIGIN = "https://kiiya-cleaning-checker.hherocl278.chatgpt.site";
-const CALLBACK = `${ORIGIN}/api/chatwork/oauth/callback`;
+function configuredOrigin(request: Request): string { return resolveAppOrigin(request.url, settings.APP_ORIGIN); }
+function callbackUrl(request: Request): string { return `${configuredOrigin(request)}/api/chatwork/oauth/callback`; }
 const COOKIE = "kiiya_chatwork_oauth_state";
 class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
 function db(): D1Database { if (!settings.DB) throw new ApiError(503, "D1が未設定です"); return settings.DB; }
@@ -22,12 +24,13 @@ function errorReply(error: unknown): Response {
   console.error("chatwork_failure", error instanceof Error ? error.name : "unknown");
   return response({ error: "Chatwork接続の処理に失敗しました" }, 500);
 }
-async function itUser(request: Request): Promise<string> {
-  const id = request.headers.get("oai-authenticated-user-id");
+async function itUser(_request: Request): Promise<string> {
+  const user = await getAuthenticatedUser();
+  const id = user?.userId ?? null;
   if (!id) throw new ApiError(401, "サインインが必要です");
   if (!await hasStaffAccess(db(), settings.APP_STAFF_USER_IDS, id)) throw new ApiError(403, "このアカウントは利用できません");
-  const user = await db().prepare("SELECT active,role FROM app_users WHERE id=?").bind(id).first<{ active: number; role: string }>();
-  if (!user?.active || user.role !== "field") throw new ApiError(403, "現場職員だけが操作できます");
+  const userRow = await db().prepare("SELECT active,role FROM app_users WHERE id=?").bind(id).first<{ active: number; role: string }>();
+  if (!userRow?.active || userRow.role !== "field") throw new ApiError(403, "現場職員だけが操作できます");
   return id;
 }
 function enabled(): boolean {
@@ -37,11 +40,11 @@ function enabled(): boolean {
 function configured(): boolean { return !!(settings.CHATWORK_SMOKE_CLIENT_ID && settings.CHATWORK_SMOKE_CLIENT_SECRET && settings.CHATWORK_SMOKE_TOKEN_KEY && /^\d+$/.test(settings.CHATWORK_SMOKE_ROOM_ID || "")); }
 function guard(request: Request): void {
   if (!enabled() || !configured()) throw new ApiError(503, "検証用Chatwork接続は無効です");
-  if (new URL(request.url).origin !== ORIGIN) throw new ApiError(403, "SiteのURLが一致しません");
+  if (new URL(request.url).origin !== configuredOrigin(request)) throw new ApiError(403, "SiteのURLが一致しません");
 }
 function mutationGuard(request: Request): void {
   guard(request);
-  if (request.headers.get("origin") !== ORIGIN) throw new ApiError(403, "送信元が一致しません");
+  if (request.headers.get("origin") !== configuredOrigin(request)) throw new ApiError(403, "送信元が一致しません");
 }
 async function json(request: Request): Promise<Record<string, unknown>> {
   const value = await request.json();
@@ -97,7 +100,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
     const now = Date.now();
     await db().prepare("INSERT INTO chatwork_oauth_attempts (state_hash,actor_id,verifier_cipher,expires_at,created_at) VALUES (?,?,?,?,?)")
       .bind(hash, actor, await seal(verifier, settings.CHATWORK_SMOKE_TOKEN_KEY!), now + 600_000, new Date().toISOString()).run();
-    const reply = response({ authorizeUrl: authorizeUrl(settings.CHATWORK_SMOKE_CLIENT_ID!, CALLBACK, state, challenge) });
+    const reply = response({ authorizeUrl: authorizeUrl(settings.CHATWORK_SMOKE_CLIENT_ID!, callbackUrl(request), state, challenge) });
     reply.headers.set("set-cookie", `${COOKIE}=${state}; Path=/api/chatwork/oauth/callback; Max-Age=600; HttpOnly; Secure; SameSite=Lax`);
     return reply;
   }
@@ -114,7 +117,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
       .bind(new Date().toISOString(), hash, actor, now).run();
     if (!consumed.meta.changes) throw new ApiError(409, "OAuthコードは使用済みです");
     const verifier = await unseal(pending.verifier_cipher, settings.CHATWORK_SMOKE_TOKEN_KEY!);
-    const tokens = await exchangeCode(settings.CHATWORK_SMOKE_CLIENT_ID!, settings.CHATWORK_SMOKE_CLIENT_SECRET!, CALLBACK, code, verifier);
+    const tokens = await exchangeCode(settings.CHATWORK_SMOKE_CLIENT_ID!, settings.CHATWORK_SMOKE_CLIENT_SECRET!, callbackUrl(request), code, verifier);
     const me = await chatworkMe(tokens.accessToken), current = await connection(), nowText = new Date().toISOString();
     const same = current?.account_id === String(me.account_id);
     const cipher = await seal(JSON.stringify(tokens), settings.CHATWORK_SMOKE_TOKEN_KEY!);
@@ -127,7 +130,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
           cipher, tokens.expiresAt, same && current.account_confirmed ? "DestinationVerificationRequired" : "AccountConfirmationRequired", nowText, current.revision).run();
       if (!updated.meta.changes) throw new ApiError(409, "接続が競合しました。再接続してください");
     }
-    return completedOAuthRedirect(ORIGIN, clearCookie());
+    return completedOAuthRedirect(configuredOrigin(request), clearCookie());
   }
   if (method === "POST" && path.join("/") === "account/confirm") {
     mutationGuard(request);

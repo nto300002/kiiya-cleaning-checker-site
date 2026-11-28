@@ -526,6 +526,38 @@
         "updated_at"
       ],
       "export": []
+    },
+    "app_sessions": {
+      "columns": [
+        "token_hash",
+        "user_id",
+        "email",
+        "display_name",
+        "last_activity_ms",
+        "created_at_ms"
+      ],
+      "export": []
+    },
+    "oauth_states": {
+      "columns": [
+        "state_hash",
+        "browser_token_hash",
+        "nonce",
+        "code_verifier",
+        "return_to",
+        "expires_at_ms",
+        "created_at_ms"
+      ],
+      "export": []
+    },
+    "staff_identities": {
+      "columns": [
+        "google_sub",
+        "user_id",
+        "email",
+        "created_at"
+      ],
+      "export": []
     }
   }
 }

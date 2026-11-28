@@ -1,4 +1,6 @@
 import { env } from "cloudflare:workers";
+import { getAuthenticatedUser } from "@/app/chatgpt-auth";
+import { resolveAppOrigin } from "@/lib/google-oidc-core.mjs";
 import { authorizeUrl, chatworkMe, chatworkRoom, ChatworkHttpError, exchangeCode, randomSecret, refreshToken, seal, sha256, unseal, hasChatworkFileScope, type TokenBundle } from "@/lib/chatwork";
 import { confirmAccount, confirmRoom, connectAccount } from "@/lib/chatwork-production-store";
 import { reconcileVerification, invalidateObsoleteVerifications, invalidateObsoleteReportJobs, claimDelivery, confirmVerification, createVerification, finishArtifact, type DeliveryJob } from "@/lib/chatwork-delivery-store";
@@ -16,10 +18,10 @@ import { verificationPathReady } from "@/lib/verification-readiness";
 
 export const runtime = "edge";
 type Context = { params: Promise<{ path: string[] }> };
-type ProductionEnv = { DB?: D1Database; BUCKET?: R2Bucket; CHATWORK_PRODUCTION_CLIENT_ID?: string; CHATWORK_PRODUCTION_CLIENT_SECRET?: string; CHATWORK_PRODUCTION_TOKEN_KEY?: string; APP_STAFF_USER_IDS?: string; DELIVERY_WORKER_URL?: string; DELIVERY_WORKER_SHARED_SECRET?: string; DELIVERY_CONTROL_SECRET?: string; DELIVERY_CONTROL_OPERATOR_ID?: string; DELIVERY_WORKER_IDENTITY_AUDIENCE?: string; DELIVERY_TEST_ACCOUNT_ID?: string; DELIVERY_TEST_ROOM_ID?: string; DELIVERY_TRIAL_WORKER_SUBJECT?:string; SITE_ASSET_ACCESS_TOKEN?:string };
+type ProductionEnv = { DB?: D1Database; BUCKET?: R2Bucket; APP_ORIGIN?: string; CHATWORK_PRODUCTION_CLIENT_ID?: string; CHATWORK_PRODUCTION_CLIENT_SECRET?: string; CHATWORK_PRODUCTION_TOKEN_KEY?: string; APP_STAFF_USER_IDS?: string; DELIVERY_WORKER_URL?: string; DELIVERY_WORKER_SHARED_SECRET?: string; DELIVERY_CONTROL_SECRET?: string; DELIVERY_CONTROL_OPERATOR_ID?: string; DELIVERY_WORKER_IDENTITY_AUDIENCE?: string; DELIVERY_TEST_ACCOUNT_ID?: string; DELIVERY_TEST_ROOM_ID?: string; DELIVERY_TRIAL_WORKER_SUBJECT?:string; SITE_ASSET_ACCESS_TOKEN?:string };
 const settings = env as unknown as ProductionEnv;
-const ORIGIN = "https://kiiya-cleaning-checker.hherocl278.chatgpt.site";
-const CALLBACK = `${ORIGIN}/api/chatwork/production/oauth/callback`;
+function configuredOrigin(request: Request): string { return resolveAppOrigin(request.url, settings.APP_ORIGIN); }
+function callbackUrl(request: Request): string { return `${configuredOrigin(request)}/api/chatwork/production/oauth/callback`; }
 const COOKIE = "kiiya_chatwork_production_state";
 class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
 function db(): D1Database { if (!settings.DB) throw new ApiError(503, "保存先を利用できません"); return settings.DB; }
@@ -33,8 +35,9 @@ function failure(error: unknown): Response {
   console.error("production_chatwork_failure", error instanceof Error ? error.name : "unknown");
   return reply({ error: "Chatwork設定を処理できません" }, 500);
 }
-async function actor(request: Request): Promise<{ id: string; staffRevision: number }> {
-  const id = request.headers.get("oai-authenticated-user-id");
+async function actor(_request: Request): Promise<{ id: string; staffRevision: number }> {
+  const authUser = await getAuthenticatedUser();
+  const id = authUser?.userId ?? null;
   if (!id) throw new ApiError(401, "サインインしてください");
   if (!await hasStaffAccess(db(), settings.APP_STAFF_USER_IDS, id)) throw new ApiError(403, "このアカウントは利用できません");
   const user = await db().prepare("SELECT active,role,staff_revision FROM app_users WHERE id=?").bind(id).first<any>();
@@ -46,7 +49,8 @@ async function requireRoomManager(id: string): Promise<void> {
   if (user?.role !== "field") throw new ApiError(403, "送信先の設定は現場職員だけが行えます");
 }
 function guard(request: Request, mutation = false): void {
-  if (new URL(request.url).origin !== ORIGIN || (mutation && request.headers.get("origin") !== ORIGIN)) throw new ApiError(403, "接続元が一致しません");
+  const expected = configuredOrigin(request);
+  if (new URL(request.url).origin !== expected || (mutation && request.headers.get("origin") !== expected)) throw new ApiError(403, "接続元が一致しません");
 }
 function credentials(): void {
   if (!settings.CHATWORK_PRODUCTION_CLIENT_ID || !settings.CHATWORK_PRODUCTION_CLIENT_SECRET || !settings.CHATWORK_PRODUCTION_TOKEN_KEY) throw new ApiError(503, "Chatworkの接続準備が完了していません");
@@ -459,7 +463,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
     if(!await withPreparationStage(log,'manifest',()=>createReportManifest(db(),{jobId:input.jobId as string,actorId:id,staffRevision,now:Date.now()})))throw new ApiError(409,'報告内容または添付を確認してください');
     const loadFont=async()=>{
       if(!settings.SITE_ASSET_ACCESS_TOKEN)throw new ApiError(503,'PDFフォント用の認証設定を確認してください');
-      const bytes=await fetchReportFont(fetch,{'OAI-Sites-Authorization':`Bearer ${settings.SITE_ASSET_ACCESS_TOKEN}`},log);
+      const bytes=await fetchReportFont(fetch,{'OAI-Sites-Authorization':`Bearer ${settings.SITE_ASSET_ACCESS_TOKEN}`},log,configuredOrigin(request));
       if(bytes.length>10_000_000)throw new ApiError(503,'PDFフォントが不正です');
       const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new Uint8Array(bytes).buffer)),b=>b.toString(16).padStart(2,'0')).join('');
       if(digest!=='59db22acee2c4c9e88bac7dbf6555c8be70a212e5e2cc884ae04b24166bd4794')throw new ApiError(503,'PDFフォントを検証できません');
@@ -551,7 +555,7 @@ async function api(request: Request, path: string[]): Promise<Response> {
     const inserted = await db().prepare("INSERT INTO chatwork_production_oauth_attempts (state_hash,actor_id,verifier_cipher,expires_at,created_at) SELECT ?,?,?,?,? FROM app_users WHERE id=? AND active=1 AND role IN ('normal','field') AND staff_revision=?")
       .bind(await sha256(state), id, await seal(verifier, settings.CHATWORK_PRODUCTION_TOKEN_KEY!), now + 600_000, new Date().toISOString(), id, staffRevision).run();
     if (!inserted.meta.changes) { await actor(request); throw new ApiError(409, "職員の権限が変更されました"); }
-    const response = reply({ authorizeUrl: authorizeUrl(settings.CHATWORK_PRODUCTION_CLIENT_ID!, CALLBACK, state, await sha256(verifier), {files:true}) });
+    const response = reply({ authorizeUrl: authorizeUrl(settings.CHATWORK_PRODUCTION_CLIENT_ID!, callbackUrl(request), state, await sha256(verifier), {files:true}) });
     response.headers.set("set-cookie", `${COOKIE}=${state}; Path=/api/chatwork/production/oauth/callback; Max-Age=600; HttpOnly; Secure; SameSite=Lax`);
     return response;
   }
@@ -568,13 +572,13 @@ async function api(request: Request, path: string[]): Promise<Response> {
       .bind(new Date().toISOString(), hash, id, now).run();
     if (!consumed.meta.changes) throw new ApiError(409, "この認証は使用済みです");
     const verifier = await unseal(pending.verifier_cipher, settings.CHATWORK_PRODUCTION_TOKEN_KEY!);
-    const tokens = await exchangeCode(settings.CHATWORK_PRODUCTION_CLIENT_ID!, settings.CHATWORK_PRODUCTION_CLIENT_SECRET!, CALLBACK, code, verifier);
+    const tokens = await exchangeCode(settings.CHATWORK_PRODUCTION_CLIENT_ID!, settings.CHATWORK_PRODUCTION_CLIENT_SECRET!, callbackUrl(request), code, verifier);
     const me = await chatworkMe(tokens.accessToken), row = await current(), accountId = String(me.account_id);
     const saved = await connectAccount(db(), { actorId: id, staffRevision, expectedVersion: row.version, accountId, displayName: me.name,
       tokenCipher: await seal(JSON.stringify(tokens), settings.CHATWORK_PRODUCTION_TOKEN_KEY!), expiresAt: tokens.expiresAt,
       now: new Date().toISOString(), auditId: crypto.randomUUID() });
     if (!saved) { await actor(request); throw new ApiError(409, "設定が変更されました。再接続してください"); }
-    return new Response(null, { status: 303, headers: { location: `${ORIGIN}/?chatwork=production-connected`, "set-cookie": `${COOKIE}=; Path=/api/chatwork/production/oauth/callback; Max-Age=0; HttpOnly; Secure; SameSite=Lax`, "cache-control": "no-store" } });
+    return new Response(null, { status: 303, headers: { location: `${configuredOrigin(request)}/?chatwork=production-connected`, "set-cookie": `${COOKIE}=; Path=/api/chatwork/production/oauth/callback; Max-Age=0; HttpOnly; Secure; SameSite=Lax`, "cache-control": "no-store" } });
   }
   if (route === "account/confirm" && method === "POST") {
     const input = await value(request), row = await current();

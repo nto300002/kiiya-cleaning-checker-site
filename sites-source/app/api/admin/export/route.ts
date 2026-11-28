@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers';
+import { getAuthenticatedUser } from '@/app/chatgpt-auth';
 import policy from '@/lib/export-policy.json';
 import { sha256, streamedZip } from '@/lib/export-zip';
 
@@ -93,13 +94,14 @@ async function createExport() {
       yield { name: archivePath, bytes };
     }
     if (JSON.stringify(before) !== JSON.stringify(await listObjects())) throw new Error('R2一覧が取得中に変更されました');
-    const manifest = { formatVersion: 1, exportId: crypto.randomUUID(), siteUrl: 'https://kiiya-cleaning-checker.hherocl278.chatgpt.site', generatedAt: timestamp, policyVersion: policy.version, snapshotMethod: 'single D1 batch transaction; R2 object bytes verified against two listings and ETag/size', tables: tableInfo.map(row => ({ name: row.name, count: row.count, classification: row.classification, exportedRows: exportedRows[String(row.name)] ?? 0, omittedColumns: row.omittedColumns })), assets, files: fileHashes, complete: true };
+    const manifest = { formatVersion: 1, exportId: crypto.randomUUID(), siteUrl: env.APP_ORIGIN?.trim() || 'https://kiiya-cleaning-checker.hherocl278.chatgpt.site', generatedAt: timestamp, policyVersion: policy.version, snapshotMethod: 'single D1 batch transaction; R2 object bytes verified against two listings and ETag/size', tables: tableInfo.map(row => ({ name: row.name, count: row.count, classification: row.classification, exportedRows: exportedRows[String(row.name)] ?? 0, omittedColumns: row.omittedColumns })), assets, files: fileHashes, complete: true };
     yield { name: 'manifest.json', bytes: encoder.encode(JSON.stringify(manifest, null, 2) + '\n') };
   }
   return new Response(streamedZip(entries()), { headers: { 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="${filename}"`, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
 }
-export async function GET(request: Request) {
-  const id = request.headers.get('oai-authenticated-user-id');
+export async function GET() {
+  const user = await getAuthenticatedUser();
+  const id = user?.userId ?? null;
   if (!id) return failure('サインインしてください', 401);
   if (!env.DB) return failure('DBを利用できません');
   const account = await env.DB.prepare('SELECT role, active FROM app_users WHERE id=?').bind(id).first<{ role: string; active: number }>();

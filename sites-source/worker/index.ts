@@ -2,11 +2,23 @@ import handler from "vinext/server/fetch-handler";
 import { runWithConnectorBinding } from "../lib/connector-context";
 import type { ConnectorBinding } from "../lib/connector-contract.mjs";
 
+function stripLegacySitesAuthHeaders(request: Request): Request {
+  let hasLegacyHeader = false;
+  request.headers.forEach((_value, key) => {
+    if (key.toLowerCase().startsWith("oai-authenticated-user-")) hasLegacyHeader = true;
+  });
+  if (!hasLegacyHeader) return request;
+  const sanitizedHeaders = new Headers(request.headers);
+  for (const key of Array.from(sanitizedHeaders.keys())) {
+    if (key.toLowerCase().startsWith("oai-authenticated-user-")) sanitizedHeaders.delete(key);
+  }
+  return new Request(request, { headers: sanitizedHeaders });
+}
+
 const worker = {
   fetch(request: Request, env: Cloudflare.Env, ctx: ExecutionContext<{ CONNECTORS?: ConnectorBinding }>) {
+    const sanitizedRequest = stripLegacySitesAuthHeaders(request);
     let binding = ctx.props?.CONNECTORS;
-    // Local preview emulates the same request-scoped capability. This branch and
-    // the auxiliary service binding are absent from production builds.
     if (import.meta.env.DEV && !binding && env.CONNECTORS) {
       const preview = env.CONNECTORS;
       const expiresAt = Date.now() + 60_000;
@@ -23,7 +35,7 @@ const worker = {
         },
       };
     }
-    return runWithConnectorBinding(binding, () => handler.fetch(request, env, ctx));
+    return runWithConnectorBinding(binding, () => handler.fetch(sanitizedRequest, env, ctx));
   },
 };
 

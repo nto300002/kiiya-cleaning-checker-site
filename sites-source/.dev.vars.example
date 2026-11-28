@@ -1,0 +1,11 @@
+# ローカル開発用テンプレート: `.dev.vars` にコピーして実値を設定してください（`.dev.vars` は Git 管理外）。
+# 本番環境では `npx wrangler secret put <KEY> --name kiiya-cleaning-checker` または Cloudflare Dashboard (Encrypted) で設定します。
+
+GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+APP_ORIGIN=http://127.0.0.1:8787
+
+# アプリ管理者・初期職員のユーザーID（Google sub または staff_identities で紐付けた既存ID）
+APP_ADMIN_USER_ID=your-admin-user-id
+APP_STAFF_USER_IDS=your-admin-user-id
+APP_ADMIN_LEAD_NAME=担当者名

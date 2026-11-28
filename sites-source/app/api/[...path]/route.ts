@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { getAuthenticatedUser } from "@/app/chatgpt-auth";
 import { cleanWork, initialMaster, makeWork, missingForReport, reportBody, todayJst, type WorkData } from "@/lib/domain";
 import { leadNameForNewWork } from "@/lib/lead-name";
 import { resetWork } from "@/lib/work-reset";
@@ -27,14 +28,10 @@ async function body(request: Request): Promise<Record<string, any>> {
   if (!result || typeof result !== "object" || Array.isArray(result)) throw new ApiError(400, "入力が不正です");
   return result as Record<string, any>;
 }
-function identity(request: Request): { id: string; email: string; name: string } {
-  const id = request.headers.get("oai-authenticated-user-id");
-  const email = request.headers.get("oai-authenticated-user-email");
-  if (!id || !email) throw new ApiError(401, "サインインが必要です");
-  const encoded = request.headers.get("oai-authenticated-user-full-name");
-  let name = email;
-  if (encoded) { try { name = decodeURIComponent(encoded); } catch { /* email fallback */ } }
-  return { id, email, name };
+async function identity(): Promise<{ id: string; email: string; name: string }> {
+  const user = await getAuthenticatedUser();
+  if (!user) throw new ApiError(401, "サインインが必要です");
+  return { id: user.userId, email: user.email, name: user.displayName };
 }
 async function staffRow(who: { id: string; email: string; name: string }): Promise<any> {
   if (!await hasStaffAccess(db(), env.APP_STAFF_USER_IDS, who.id)) return null;
@@ -47,8 +44,8 @@ async function staffRow(who: { id: string; email: string; name: string }): Promi
     .bind(initialRole, who.id).run();
   return db().prepare("SELECT * FROM app_users WHERE id = ?").bind(who.id).first<any>();
 }
-async function staff(request: Request): Promise<User> {
-  const who = identity(request);
+async function staff(_request: Request): Promise<User> {
+  const who = await identity();
   const row = await staffRow(who);
   if (!row?.active) throw new ApiError(403, "このアカウントは利用できません");
   return { id: who.id, email: who.email, name: row.display_name, role: row.role };
@@ -102,7 +99,7 @@ async function workDetail(id: string): Promise<any> {
 async function api(request: Request, path: string[]): Promise<Response> {
   const method = request.method;
   if (path[0] === "me" && method === "GET") {
-    const who = identity(request);
+    const who = await identity();
     const row = await staffRow(who);
     if (!row) {
       const now = new Date().toISOString();
